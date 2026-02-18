@@ -100,6 +100,11 @@ const MAX_PHOTOS = MAX_ITEM_PHOTOS;
 const MAX_PHOTO_DIMENSION = 1280; // ancho/alto maximo al comprimir
 const PHOTO_QUALITY = 0.8; // calidad JPEG al recomprimir
 const drawingColors = ["#f87171", "#facc15", "#4ade80", "#38bdf8", "#f472b6", "#ffffff"];
+const SHOW_INVENTORY_NOTIFICATIONS_PANEL = false;
+const SHOW_SELECTION_CARD = false;
+const THUMBNAILS_ENABLED = false;
+const THUMBNAIL_PREFETCH_LIMIT = 60; // evita descargas masivas
+const THUMBNAIL_FETCH_GAP_MS = 120;
 
 const makePhotoKey = (file: File) => `${file.name}-${file.size}-${file.lastModified}`;
 
@@ -236,6 +241,71 @@ const sanitizePhotos = (value: any) => {
     .slice(0, MAX_PHOTOS);
 };
 
+const readItemExtraValue = (item: Item, keys: string[]): string | null => {
+  const extra = (item.extraData ?? {}) as Record<string, unknown>;
+  for (const key of keys) {
+    const raw = extra[key];
+    if (raw === undefined || raw === null) continue;
+    if (typeof raw === "string" || typeof raw === "number") {
+      const normalized = String(raw).trim();
+      if (normalized.length) return normalized;
+    }
+  }
+  return null;
+};
+
+const getInventoryBrand = (item: Item) => {
+  const brand = readItemExtraValue(item, ["marca", "brand", "marcaVehiculo"]);
+  return brand ? brand.toUpperCase() : null;
+};
+
+const getInventoryVehicle = (item: Item) => {
+  const vehicle = readItemExtraValue(item, ["coche", "vehiculo", "modelo"]);
+  return vehicle ? vehicle.toUpperCase() : null;
+};
+
+const getInventoryPieceLabel = (item: Item) => {
+  const piece = readItemExtraValue(item, ["pieza", "descripcion", "descripcion_local", "descripcionLocal", "descripcion_ml", "descripcionMl"]);
+  if (piece) return piece.toUpperCase();
+  const title = (item.title ?? "").toString().trim();
+  return title.length ? title.toUpperCase() : null;
+};
+
+const toYearNumber = (value: string | null) => {
+  if (!value) return null;
+  const match = value.match(/\d{4}/);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[0], 10);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const getInventoryYearNumbers = (item: Item) => {
+  const startRaw = readItemExtraValue(item, ["ano_desde", "anoDesde"]);
+  const endRaw = readItemExtraValue(item, ["ano_hasta", "anoHasta"]);
+  const start = toYearNumber(startRaw);
+  const end = toYearNumber(endRaw);
+  if (!start && !end) return [];
+  if (start && !end) return [start];
+  if (!start && end) return [end];
+  const min = Math.min(start!, end!);
+  const max = Math.max(start!, end!);
+  const maxSpan = Math.min(max - min, 60);
+  const years: number[] = [];
+  for (let year = min; year <= min + maxSpan; year += 1) {
+    years.push(year);
+  }
+  return years;
+};
+
+const matchesInventoryYearFilter = (item: Item, yearFilter: string) => {
+  if (yearFilter === "ALL") return true;
+  const numericYear = Number.parseInt(yearFilter, 10);
+  if (Number.isNaN(numericYear)) return true;
+  const years = getInventoryYearNumbers(item);
+  if (!years.length) return false;
+  return years.includes(numericYear);
+};
+
 const toFocusedInfo = (item?: Item | null): FocusedInfo | null => {
   if (!item) return null;
   const extra = item.extraData ?? {};
@@ -315,11 +385,16 @@ const getStatusBadgeClass = (status?: string | null) => {
 
 export function InventoryClient({ initialPage, userRole, mode = "full" }: InventoryClientProps) {
   const isManualOnly = mode === "manual-only";
+  const showNotificationsPanel = SHOW_INVENTORY_NOTIFICATIONS_PANEL && !isManualOnly;
   const [items, setItems] = useState<Item[]>(initialPage.items);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [search, setSearch] = useState("");
   const [focusedRowInfo, setFocusedRowInfo] = useState<FocusedInfo | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [brandFilter, setBrandFilter] = useState<string>("ALL");
+  const [vehicleFilter, setVehicleFilter] = useState<string>("ALL");
+  const [yearFilter, setYearFilter] = useState<string>("ALL");
+  const [pieceFilter, setPieceFilter] = useState<string>("ALL");
   const [form, setForm] = useState({
     skuInternal: "",
     estatusInterno: "",
@@ -372,6 +447,10 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
   const [photoModalError, setPhotoModalError] = useState<string | null>(null);
   const [photoModalLoading, setPhotoModalLoading] = useState(false);
   const [modalActiveIndex, setModalActiveIndex] = useState(0);
+  const [showThumbnails, setShowThumbnails] = useState(false);
+  const [thumbnailCache, setThumbnailCache] = useState<Record<string, string | null>>({});
+  const [thumbnailLoadingIds, setThumbnailLoadingIds] = useState<Record<string, boolean>>({});
+  const [thumbnailErrors, setThumbnailErrors] = useState<Record<string, string | null>>({});
   const [mlAction, setMlAction] = useState<null | "pause" | "activate">(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastNotificationIdRef = useRef<string | null>(null);
@@ -383,10 +462,8 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
   const pageSizeRef = useRef(initialPage.pageSize);
   const [totalItems, setTotalItems] = useState(initialPage.total);
   const [listLoading, setListLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [loadingAll, setLoadingAll] = useState(false);
   const [sectionVisibility, setSectionVisibility] = useState<Record<SectionKey, boolean>>({
-    notifications: true,
+    notifications: showNotificationsPanel,
     manual: true,
     import: true
   });
@@ -398,6 +475,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
   const canCreateManual = canEditInventory || normalizedRole === "operator" || normalizedRole === "uploader";
   const canImportInventory = canEditInventory;
   const canManageMercadoLibre = canEditInventory;
+  const thumbnailsActive = showThumbnails && THUMBNAILS_ENABLED;
 
   useEffect(() => {
     const handleResize = () => {
@@ -417,9 +495,15 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
     if (isMobile) {
       setSectionVisibility({ notifications: false, manual: true, import: false });
     } else {
-      setSectionVisibility({ notifications: true, manual: true, import: true });
+      setSectionVisibility({ notifications: SHOW_INVENTORY_NOTIFICATIONS_PANEL, manual: true, import: true });
     }
   }, [isManualOnly, isMobile]);
+
+  useEffect(() => {
+    if (!THUMBNAILS_ENABLED && showThumbnails) {
+      setShowThumbnails(false);
+    }
+  }, [showThumbnails]);
 
   const toggleSection = useCallback((section: SectionKey) => {
     if (!isMobile || isManualOnly) return;
@@ -482,7 +566,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
   }, []);
 
   useEffect(() => {
-    if (isManualOnly) {
+    if (isManualOnly || !SHOW_INVENTORY_NOTIFICATIONS_PANEL) {
       return undefined;
     }
     fetchNotifications({ silent: true });
@@ -509,105 +593,8 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
     }
   };
 
-  const fetchPage = useCallback(
-    async (page: number, options?: { append?: boolean }) => {
-      const append = Boolean(options?.append);
-      if (append) {
-        setLoadingMore(true);
-      } else {
-        setListLoading(true);
-      }
-      try {
-        const params = new URLSearchParams({
-          page: page.toString(),
-          pageSize: pageSizeRef.current.toString()
-        });
-        const res = await fetch(`/api/inventory?${params.toString()}`, { cache: "no-store" });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          throw new Error(data.error || "No se pudo obtener el inventario");
-        }
-        const incoming: Item[] = Array.isArray(data.items) ? data.items : [];
-        const now = Date.now();
-        const incomingWithLocal = incoming.map((item) => {
-          const local = localEstatusInternoRef.current.get(item.id);
-          if (!local) return item;
-          if (now - local.updatedAt > 10 * 60 * 1000) {
-            localEstatusInternoRef.current.delete(item.id);
-            return item;
-          }
-          const currentInternal = (item.extraData?.estatus_interno ?? "").toString().trim().toUpperCase();
-          if (currentInternal === local.value) {
-            localEstatusInternoRef.current.delete(item.id);
-            return item;
-          }
-          const nextExtra: Record<string, any> = { ...(item.extraData ?? {}), estatus_interno: local.value || undefined };
-          if (local.prestadoVendidoA !== undefined) {
-            nextExtra.prestado_vendido_a = local.prestadoVendidoA || undefined;
-          }
-          return { ...item, extraData: nextExtra };
-        });
-        if (typeof data.pageSize === "number" && data.pageSize > 0) {
-          pageSizeRef.current = data.pageSize;
-        }
-        setTotalItems(typeof data.total === "number" ? data.total : incomingWithLocal.length);
-        setItems((current) => {
-          if (!append) {
-            if (!updatingIds.length) {
-              return incomingWithLocal;
-            }
-            const updatingSet = new Set(updatingIds);
-            const currentMap = new Map(current.map((item) => [item.id, item]));
-            return incomingWithLocal.map((item) =>
-              updatingSet.has(item.id) ? currentMap.get(item.id) ?? item : item
-            );
-          }
-          const existingIds = new Set(current.map((item) => item.id));
-          const merged = [...current];
-          incomingWithLocal.forEach((item) => {
-            if (!existingIds.has(item.id)) {
-              merged.push(item);
-              existingIds.add(item.id);
-            }
-          });
-          return merged;
-        });
-        if (!append) {
-          setSelectedIds([]);
-          setFocusedRowInfo(null);
-        }
-        return true;
-      } catch (err: any) {
-        setMessage(err?.message || "No se pudo obtener el inventario");
-        return false;
-      } finally {
-        if (append) {
-          setLoadingMore(false);
-        } else {
-          setListLoading(false);
-        }
-      }
-    },
-    [setMessage, updatingIds]
-  );
-
-  const refresh = useCallback(async () => {
-    if (isManualOnly) return;
-    await fetchPage(1);
-  }, [fetchPage, isManualOnly]);
-
-  const hasMoreItems = items.length < totalItems;
-
-  const loadMore = useCallback(async () => {
-    if (!hasMoreItems || loadingMore) return;
-    const pageSize = pageSizeRef.current || 1;
-    const nextPage = Math.floor(items.length / pageSize) + 1;
-    await fetchPage(nextPage, { append: true });
-  }, [fetchPage, hasMoreItems, items.length, loadingMore]);
-
-  const loadAllItems = useCallback(async () => {
-    if (loadingAll) return;
-    setLoadingAll(true);
+  const fetchAllInventory = useCallback(async () => {
+    setListLoading(true);
     setMessage(null);
     try {
       const res = await fetch("/api/inventory/all", { cache: "no-store" });
@@ -615,23 +602,47 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
       if (!res.ok) {
         throw new Error(data.error || "No se pudo traer todo el inventario");
       }
-      const list: Item[] = Array.isArray(data.items) ? data.items : [];
-      setItems(list);
-      const reportedTotal = typeof data.total === "number" ? data.total : list.length;
+      const incoming: Item[] = Array.isArray(data.items) ? data.items : [];
+      const now = Date.now();
+      const incomingWithLocal = incoming.map((item) => {
+        const local = localEstatusInternoRef.current.get(item.id);
+        if (!local) return item;
+        if (now - local.updatedAt > 10 * 60 * 1000) {
+          localEstatusInternoRef.current.delete(item.id);
+          return item;
+        }
+        const currentInternal = (item.extraData?.estatus_interno ?? "").toString().trim().toUpperCase();
+        if (currentInternal === local.value) {
+          localEstatusInternoRef.current.delete(item.id);
+          return item;
+        }
+        const nextExtra: Record<string, any> = { ...(item.extraData ?? {}), estatus_interno: local.value || undefined };
+        if (local.prestadoVendidoA !== undefined) {
+          nextExtra.prestado_vendido_a = local.prestadoVendidoA || undefined;
+        }
+        return { ...item, extraData: nextExtra };
+      });
+      setItems(incomingWithLocal);
+      const reportedTotal = typeof data.total === "number" ? data.total : incomingWithLocal.length;
       setTotalItems(reportedTotal);
+      pageSizeRef.current = incomingWithLocal.length || pageSizeRef.current;
       setSelectedIds([]);
       setFocusedRowInfo(null);
-      pageSizeRef.current = list.length || pageSizeRef.current;
       if (data.truncated) {
-        const missing = Math.max(0, reportedTotal - list.length);
-        setMessage(`Mostrando ${list.length} registros. Faltan ${missing} por el limite maximo permitido.`);
+        const missing = Math.max(0, reportedTotal - incomingWithLocal.length);
+        setMessage(`Mostrando ${incomingWithLocal.length} registros. Faltan ${missing} por el limite maximo permitido.`);
       }
     } catch (err: any) {
       setMessage(err?.message || "No se pudo traer todo el inventario");
     } finally {
-      setLoadingAll(false);
+      setListLoading(false);
     }
-  }, [loadingAll, setMessage]);
+  }, [setMessage]);
+
+  const refresh = useCallback(async () => {
+    if (isManualOnly) return;
+    await fetchAllInventory();
+  }, [fetchAllInventory, isManualOnly]);
 
   const deleteItems = useCallback(async (ids: string[], password?: string) => {
     if (!ids.length) return;
@@ -1085,6 +1096,37 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
       modalPhotoInputRef.current.value = "";
     }
   }, []);
+
+  const ensureThumbnail = useCallback(
+    async (itemId: string) => {
+      if (thumbnailCache[itemId] !== undefined || thumbnailLoadingIds[itemId]) return;
+      setThumbnailLoadingIds((prev) => ({ ...prev, [itemId]: true }));
+      try {
+        const res = await fetch(`/api/inventory/${itemId}/photos?limit=1`, { cache: "no-store" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || "No se pudo obtener la miniatura");
+        }
+        const preview = Array.isArray(data.photos) ? data.photos[0] ?? null : null;
+        setThumbnailCache((prev) => ({ ...prev, [itemId]: preview }));
+        setThumbnailErrors((prev) => {
+          const next = { ...prev };
+          delete next[itemId];
+          return next;
+        });
+      } catch (err: any) {
+        setThumbnailErrors((prev) => ({ ...prev, [itemId]: err?.message || "No se pudo cargar" }));
+        setThumbnailCache((prev) => ({ ...prev, [itemId]: null }));
+      } finally {
+        setThumbnailLoadingIds((prev) => {
+          const next = { ...prev };
+          delete next[itemId];
+          return next;
+        });
+      }
+    },
+    [thumbnailCache, thumbnailLoadingIds]
+  );
 
   const handleModalFileSelection = async (fileList: FileList | null) => {
     if (!photoModal || !fileList?.length) return;
@@ -1567,16 +1609,6 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
     }
   }, [items]);
 
-  const brandSuggestions = Array.from(
-    new Set([
-      ...brandOptions,
-      ...items
-        .map((item) => item.extraData?.marca)
-        .filter((m): m is string => Boolean(m && m.trim()))
-        .map((m) => m.toUpperCase())
-    ])
-  ).sort();
-
   const skuSuggestions = Array.from(
     new Set(
       items
@@ -1892,10 +1924,79 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
     [canEditInventory, updateExtraDataInState]
   );
 
+  const pieceOptions = useMemo(() => {
+    const set = new Set<string>();
+    items.forEach((item) => {
+      const piece = getInventoryPieceLabel(item);
+      if (piece) set.add(piece);
+    });
+    return Array.from(set).sort();
+  }, [items]);
+
+  const itemsByPiece = useMemo(() => {
+    if (pieceFilter === "ALL") return items;
+    return items.filter((item) => getInventoryPieceLabel(item) === pieceFilter);
+  }, [items, pieceFilter]);
+
+  const brandOptions = useMemo(() => {
+    const set = new Set<string>();
+    itemsByPiece.forEach((item) => {
+      const brand = getInventoryBrand(item);
+      if (brand) set.add(brand);
+    });
+    return Array.from(set).sort();
+  }, [itemsByPiece]);
+
+  const brandSuggestions = useMemo(() => {
+    return Array.from(
+      new Set([
+        ...brandOptions,
+        ...items
+          .map((item) => item.extraData?.marca)
+          .filter((m): m is string => Boolean(m && m.trim()))
+          .map((m) => m.toUpperCase())
+      ])
+    ).sort();
+  }, [brandOptions, items]);
+
+  const itemsByBrand = useMemo(() => {
+    if (brandFilter === "ALL") return itemsByPiece;
+    return itemsByPiece.filter((item) => getInventoryBrand(item) === brandFilter);
+  }, [itemsByPiece, brandFilter]);
+
+  const vehicleOptions = useMemo(() => {
+    const set = new Set<string>();
+    itemsByBrand.forEach((item) => {
+      const vehicle = getInventoryVehicle(item);
+      if (vehicle) set.add(vehicle);
+    });
+    return Array.from(set).sort();
+  }, [itemsByBrand]);
+
+  const itemsByVehicle = useMemo(() => {
+    if (vehicleFilter === "ALL") return itemsByBrand;
+    return itemsByBrand.filter((item) => getInventoryVehicle(item) === vehicleFilter);
+  }, [itemsByBrand, vehicleFilter]);
+
+  const yearOptions = useMemo(() => {
+    const set = new Set<number>();
+    itemsByVehicle.forEach((item) => {
+      getInventoryYearNumbers(item).forEach((year) => set.add(year));
+    });
+    return Array.from(set)
+      .sort((a, b) => b - a)
+      .map((year) => year.toString());
+  }, [itemsByVehicle]);
+
+  const itemsByYear = useMemo(() => {
+    if (yearFilter === "ALL") return itemsByVehicle;
+    return itemsByVehicle.filter((item) => matchesInventoryYearFilter(item, yearFilter));
+  }, [itemsByVehicle, yearFilter]);
+
   const normalizedSearch = search.trim().toLowerCase();
   const searchFilteredItems = useMemo(() => {
-    if (!normalizedSearch) return items;
-    return items.filter((item) => {
+    if (!normalizedSearch) return itemsByYear;
+    return itemsByYear.filter((item) => {
       const haystack = [
         item.skuInternal,
         item.title ?? "",
@@ -1923,7 +2024,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
         .toLowerCase();
       return haystack.includes(normalizedSearch);
     });
-  }, [items, normalizedSearch]);
+  }, [itemsByYear, normalizedSearch]);
 
   const normalizedStatusFilter = statusFilter?.toUpperCase() ?? null;
   const filteredItems = useMemo(() => {
@@ -2007,11 +2108,39 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
     });
   }, [items]);
 
+  useEffect(() => {
+    if (!thumbnailsActive) return;
+    const queue = filteredItems
+      .filter((item) => (item.photoCount ?? 0) > 0)
+      .slice(0, THUMBNAIL_PREFETCH_LIMIT)
+      .map((item) => item.id)
+      .filter((id) => thumbnailCache[id] === undefined && !thumbnailLoadingIds[id]);
+
+    if (!queue.length) return;
+
+    let cancelled = false;
+
+    const processQueue = async () => {
+      for (const id of queue) {
+        if (cancelled) break;
+        await ensureThumbnail(id);
+        if (cancelled) break;
+        await new Promise((resolve) => setTimeout(resolve, THUMBNAIL_FETCH_GAP_MS));
+      }
+    };
+
+    processQueue();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [thumbnailsActive, filteredItems, ensureThumbnail, thumbnailCache, thumbnailLoadingIds]);
+
   
 
   return (
     <>
-      {!isManualOnly && toastNotification && (
+      {!isManualOnly && SHOW_INVENTORY_NOTIFICATIONS_PANEL && toastNotification && (
         <div className="fixed right-4 top-4 z-50 w-full max-w-sm rounded-2xl border border-slate-700 bg-slate-900/95 p-4 shadow-2xl backdrop-blur">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -2070,7 +2199,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
             </div>
             <p className="mt-3 text-sm text-slate-300">Carga manual o importa Excel. Encabezados aceptados: SKU/CODIGO, DESCRIPCION o DESCRIPCION ML o DESCRIPCION LOCAL, PRECIO, INVENTARIO/STOCK/CANTIDAD, CODIGO DE MERCADO LIBRE, CODIGO UNIVERSAL, ESTATUS (active/paused/inactive), ESTATUS INTERNO, ORIGEN, MARCA, COCHE, AÑO DESDE, AÑO HASTA, UBICACION, FACEBOOK, PIEZA.</p>
           </header>
-  {!isManualOnly && (
+  {showNotificationsPanel && (
   <section className="bg-slate-900/70 border border-slate-700 rounded-2xl p-4 shadow space-y-3">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -2498,66 +2627,194 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
               <h2 className="text-lg font-semibold">Inventario cargado</h2>
               <p className="text-xs text-slate-400">Selecciona filas para borrar, busca por SKU, titulo o codigo de Mercado Libre.</p>
             </div>
-            <div className="flex flex-wrap gap-2 items-center">
-              <input
-                type="search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Buscar..."
-                className="w-full sm:w-64 rounded-md bg-slate-900 border border-slate-700 px-3 py-2 text-sm focus:border-amber-400 focus:outline-none"
-              />
-              <span className="text-xs text-slate-400">
-                Mostrando {filteredItems.length} de {items.length}
-              </span>
-            </div>
-          </div>
-          <div className="rounded-2xl border border-slate-700 bg-slate-900/50 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-[11px] uppercase tracking-[0.4em] text-slate-400">Seleccion actual</p>
-              {focusedRowInfo && (
-                <span className="text-[11px] text-slate-500">Se actualiza al cambiar de celda</span>
-              )}
-            </div>
-            {focusedRowInfo ? (
-              <div className="mt-3 grid gap-4 sm:grid-cols-4">
-                <div>
-                  <p className="text-xs text-slate-400">SKU</p>
-                  <p className="text-xl font-semibold tracking-wide text-slate-100">{focusedRowInfo.sku}</p>
+            <div className="w-full space-y-4">
+              <div className="rounded-2xl border border-slate-700 bg-slate-900/60 p-4">
+                <label className="text-sm text-slate-400" htmlFor="inventory-search">
+                  Buscar por SKU, modelo o palabra clave
+                </label>
+                <input
+                  id="inventory-search"
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Ej. faro, versa, 12345"
+                  className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-amber-400"
+                />
+                <div className="mt-3 flex flex-col gap-2 rounded-2xl border border-slate-800/80 bg-slate-950/40 p-3 text-sm text-slate-300 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="space-y-1">
+                    <p className="font-semibold text-slate-100">Ver miniaturas</p>
+                    <p className="text-[11px] text-slate-500">
+                      {THUMBNAILS_ENABLED
+                        ? "Carga diferida de la primera foto para cada pieza. Solo se descargan cuando esta opcion esta activa."
+                        : "Miniaturas desactivadas temporalmente para acelerar la carga."}
+                    </p>
+                  </div>
+                  {THUMBNAILS_ENABLED && (
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-slate-600 bg-slate-950 text-amber-400 focus:ring-amber-400"
+                        checked={showThumbnails}
+                        onChange={(event) => setShowThumbnails(event.target.checked)}
+                      />
+                      <span className="text-xs text-slate-200">
+                        {showThumbnails ? "Miniaturas activas" : "Activar miniaturas"}
+                      </span>
+                    </label>
+                  )}
                 </div>
-                <div>
-                  <p className="text-xs text-slate-400">Coche</p>
-                  <p className="text-xl font-semibold text-slate-100">{focusedRowInfo.coche}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400">Año</p>
-                  <p className="text-xl font-semibold text-slate-100">{focusedRowInfo.ano}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400">Descripción</p>
-                  <p className="text-xl font-semibold text-slate-100">
-                    {(() => {
-                      const item = items.find((it) => it.skuInternal === focusedRowInfo.sku);
-                      if (!item) return "-";
-                      const extra = item.extraData ?? {};
-                      const yearSegment = extra.ano_desde || extra.ano_hasta
-                        ? extra.ano_desde && extra.ano_hasta && extra.ano_desde !== extra.ano_hasta
-                          ? `${extra.ano_desde}-${extra.ano_hasta}`
-                          : extra.ano_desde ?? extra.ano_hasta
-                        : "";
-                      const parts = [extra.pieza, extra.marca, extra.coche, yearSegment, item.skuInternal]
-                        .map((part) => (part ?? "").toString().trim())
-                        .filter((part) => part.length);
-                      return parts.length ? parts.join(" ") : "-";
-                    })()}
-                  </p>
+                <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+                  <div>
+                    <label className="text-sm text-slate-400" htmlFor="inventory-piece-filter">
+                      Filtrar por pieza
+                    </label>
+                    <select
+                      id="inventory-piece-filter"
+                      className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-amber-400"
+                      value={pieceFilter}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        setPieceFilter(next);
+                        setBrandFilter("ALL");
+                        setVehicleFilter("ALL");
+                        setYearFilter("ALL");
+                      }}
+                    >
+                      <option value="ALL">Todas</option>
+                      {pieceOptions.map((piece) => (
+                        <option key={piece} value={piece}>
+                          {piece}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-slate-400" htmlFor="inventory-brand-filter">
+                      Filtrar por marca
+                    </label>
+                    <select
+                      id="inventory-brand-filter"
+                      className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-amber-400"
+                      value={brandFilter}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        setBrandFilter(next);
+                        setVehicleFilter("ALL");
+                        setYearFilter("ALL");
+                      }}
+                    >
+                      <option value="ALL">Todas</option>
+                      {brandOptions.map((brand) => (
+                        <option key={brand} value={brand}>
+                          {brand}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-slate-400" htmlFor="inventory-vehicle-filter">
+                      Filtrar por coche
+                    </label>
+                    <select
+                      id="inventory-vehicle-filter"
+                      className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-amber-400"
+                      value={vehicleFilter}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        setVehicleFilter(next);
+                        setYearFilter("ALL");
+                      }}
+                    >
+                      <option value="ALL">Todos</option>
+                      {vehicleOptions.map((vehicle) => (
+                        <option key={vehicle} value={vehicle}>
+                          {vehicle}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-slate-400" htmlFor="inventory-year-filter">
+                      Filtrar por año
+                    </label>
+                    <select
+                      id="inventory-year-filter"
+                      className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-amber-400"
+                      value={yearFilter}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        setYearFilter(next);
+                      }}
+                    >
+                      <option value="ALL">Todos</option>
+                      {yearOptions.map((year) => (
+                        <option key={year} value={year}>
+                          {year}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               </div>
-            ) : (
-              <p className="mt-3 text-sm text-slate-400">
-                Selecciona una celda o marca un registro para ver el SKU, el coche, el rango de años y la descripción.
-              </p>
-            )}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span className="text-sm text-slate-100">
+                  Mostrando {filteredItems.length} de {itemsByYear.length}
+                </span>
+                <span className="text-xs text-slate-500">
+                  Filtrando sobre {itemsByYear.length} registros · Total inventario {items.length}
+                </span>
+              </div>
+            </div>
           </div>
+          {SHOW_SELECTION_CARD && (
+            <div className="rounded-2xl border border-slate-700 bg-slate-900/50 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[11px] uppercase tracking-[0.4em] text-slate-400">Seleccion actual</p>
+                {focusedRowInfo && (
+                  <span className="text-[11px] text-slate-500">Se actualiza al cambiar de celda</span>
+                )}
+              </div>
+              {focusedRowInfo ? (
+                <div className="mt-3 grid gap-4 sm:grid-cols-4">
+                  <div>
+                    <p className="text-xs text-slate-400">SKU</p>
+                    <p className="text-xl font-semibold tracking-wide text-slate-100">{focusedRowInfo.sku}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-400">Coche</p>
+                    <p className="text-xl font-semibold text-slate-100">{focusedRowInfo.coche}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-400">Año</p>
+                    <p className="text-xl font-semibold text-slate-100">{focusedRowInfo.ano}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-400">Descripción</p>
+                    <p className="text-xl font-semibold text-slate-100">
+                      {(() => {
+                        const item = items.find((it) => it.skuInternal === focusedRowInfo.sku);
+                        if (!item) return "-";
+                        const extra = item.extraData ?? {};
+                        const yearSegment = extra.ano_desde || extra.ano_hasta
+                          ? extra.ano_desde && extra.ano_hasta && extra.ano_desde !== extra.ano_hasta
+                            ? `${extra.ano_desde}-${extra.ano_hasta}`
+                            : extra.ano_desde ?? extra.ano_hasta
+                          : "";
+                        const parts = [extra.pieza, extra.marca, extra.coche, yearSegment, item.skuInternal]
+                          .map((part) => (part ?? "").toString().trim())
+                          .filter((part) => part.length);
+                        return parts.length ? parts.join(" ") : "-";
+                      })()}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-3 text-sm text-slate-400">
+                  Selecciona una celda o marca un registro para ver el SKU, el coche, el rango de años y la descripción.
+                </p>
+              )}
+            </div>
+          )}
           {canManageMercadoLibre ? (
             <div className="flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-900/60 p-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1">
@@ -2659,7 +2916,6 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                         </button>
                       </div>
                     </th>
-                    <th className="px-4 py-3 text-left">Fotos</th>
                     <th className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <span>Precio</span>
@@ -2685,6 +2941,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                       </div>
                     </th>
                     <th className="px-4 py-3 text-left">Codigo ML</th>
+                    <th className="px-4 py-3 text-left">Fotos</th>
                     <th className="px-4 py-3 text-left">
                       <div className="flex items-center gap-2">
                         <span>Estatus</span>
@@ -2766,6 +3023,10 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                       : "";
                     const photosCount = typeof item.photoCount === "number" ? item.photoCount : 0;
                     const mlUrl = item.mlItemId ? `https://articulo.mercadolibre.com.mx/${item.mlItemId}` : null;
+                    const previewEnabled = thumbnailsActive && photosCount > 0;
+                    const previewSrc = previewEnabled ? thumbnailCache[item.id] : null;
+                    const previewLoading = previewEnabled && Boolean(thumbnailLoadingIds[item.id]);
+                    const previewError = previewEnabled ? thumbnailErrors[item.id] : null;
                     return (
                       <tr
                         key={item.id}
@@ -2829,26 +3090,6 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                             <div className="text-xs text-slate-500">Ubicacion: {extra.ubicacion}</div>
                           )}
                         </td>
-                        <td className="px-4 py-3 align-middle text-xs">
-                          <div className="flex items-center gap-3">
-                            <button
-                              type="button"
-                              className="h-12 w-12 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/60 text-[10px] text-slate-500"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                if (canEditInventory) {
-                                  openPhotoModal(item);
-                                }
-                              }}
-                              disabled={!canEditInventory}
-                            >
-                              {photosCount ? "Ver" : "Sin"}
-                            </button>
-                            <div className="text-xs text-slate-400">
-                              {photosCount ? `${photosCount} fotos` : "Sin fotos"}
-                            </div>
-                          </div>
-                        </td>
                         <td className="px-4 py-3 text-right align-middle font-bold text-emerald-300">
                           {canEditInventory && isEditing ? (
                             <input
@@ -2892,6 +3133,68 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                           ) : (
                             <span className="text-slate-200">{item.mlItemId || "-"}</span>
                           )}
+                        </td>
+                        <td className="px-4 py-3 align-middle text-xs">
+                          <div className="flex items-center gap-3">
+                            <button
+                              type="button"
+                              className={`relative flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 transition ${
+                                canEditInventory ? "hover:border-amber-300" : "opacity-60"
+                              }`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                if (canEditInventory) {
+                                  openPhotoModal(item);
+                                }
+                              }}
+                              onMouseEnter={() => {
+                                if (previewEnabled) ensureThumbnail(item.id);
+                              }}
+                              onFocus={() => {
+                                if (previewEnabled) ensureThumbnail(item.id);
+                              }}
+                              disabled={!canEditInventory}
+                              aria-label={photosCount ? "Ver fotos" : "Sin fotos"}
+                            >
+                              {previewEnabled ? (
+                                previewSrc ? (
+                                  <img
+                                    src={previewSrc}
+                                    alt={`Miniatura ${pieceName}`}
+                                    className="h-full w-full object-cover"
+                                    loading="lazy"
+                                    decoding="async"
+                                  />
+                                ) : previewLoading ? (
+                                  <span className="text-amber-200">Cargando...</span>
+                                ) : previewError ? (
+                                  <span className="text-rose-200">Error</span>
+                                ) : (
+                                  <span className="text-slate-400">Pendiente</span>
+                                )
+                              ) : (
+                                <span className="text-slate-400">{photosCount ? "Ver" : "Sin"}</span>
+                              )}
+                            </button>
+                            <div className="text-xs text-slate-400">
+                              {photosCount ? `${photosCount} fotos` : "Sin fotos"}
+                              {photosCount ? (
+                                showThumbnails ? (
+                                  previewSrc ? (
+                                    <p className="text-[10px] text-emerald-200">Miniatura lista</p>
+                                  ) : previewLoading ? (
+                                    <p className="text-[10px] text-amber-200">Cargando miniatura...</p>
+                                  ) : previewError ? (
+                                    <p className="text-[10px] text-rose-300">{previewError}</p>
+                                  ) : (
+                                    <p className="text-[10px] text-slate-500">Miniatura pendiente</p>
+                                  )
+                                ) : (
+                                  <p className="text-[10px] text-slate-500">Activa la opción de miniaturas para previsualizar.</p>
+                                )
+                              ) : null}
+                            </div>
+                          </div>
                         </td>
                         <td className="px-4 py-3 align-middle text-slate-100">{item.status || "-"}</td>
                         <td className="min-w-[240px] px-4 py-3 align-top text-slate-100">
@@ -3065,31 +3368,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
               </table>
             )}
           </div>
-          {hasMoreItems && (
-            <div className="flex flex-col items-center gap-3 pt-4">
-              <div className="flex flex-wrap justify-center gap-2">
-                <button
-                  type="button"
-                  onClick={loadMore}
-                  disabled={loadingMore || listLoading || loadingAll}
-                  className="rounded-md border border-slate-600 px-4 py-2 text-sm text-slate-200 hover:border-amber-400 disabled:opacity-60"
-                >
-                  {loadingMore ? "Cargando..." : "Cargar más"}
-                </button>
-                <button
-                  type="button"
-                  onClick={loadAllItems}
-                  disabled={loadingAll || listLoading}
-                  className="rounded-md border border-amber-400 px-4 py-2 text-sm font-semibold text-amber-200 hover:border-amber-200 disabled:opacity-60"
-                >
-                  {loadingAll ? "Cargando todo..." : "Cargar todo"}
-                </button>
-              </div>
-              <p className="text-center text-[11px] text-slate-500">
-                Presiona &quot;Cargar todo&quot; para traer los {totalItems} registros en una sola vista. Puede tardar si el inventario es grande.
-              </p>
-            </div>
-          )}
+          
         </section>
         </>
         )}

@@ -1,9 +1,11 @@
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+import { revalidateTag } from "next/cache";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { activateItem, pauseItem } from "@/lib/mercadolibre";
 import { MAX_ITEM_PHOTOS, serializeInventoryItem } from "@/lib/inventory-serialization";
+import { INVENTORY_SNAPSHOT_TAG } from "@/lib/inventory-cache";
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -70,15 +72,160 @@ const parsePagination = (searchParams: URLSearchParams) => {
   return { page, pageSize, skip };
 };
 
+type InventoryFilters = {
+  query?: string | null;
+  piece?: string | null;
+  brand?: string | null;
+  vehicle?: string | null;
+  year?: string | null;
+  status?: string | null;
+};
+
+const buildStringCandidates = (value: string) =>
+  Array.from(new Set([value, value.toLowerCase(), value.toUpperCase()])) as string[];
+
+const buildFiltersWhere = (
+  filters: InventoryFilters | null,
+  baseWhere?: Prisma.InventoryItemWhereInput
+): Prisma.InventoryItemWhereInput => {
+  const andConditions: Prisma.InventoryItemWhereInput[] = [];
+
+  if (baseWhere) {
+    andConditions.push(baseWhere);
+  }
+
+  const normalizedQuery = filters?.query?.trim();
+  if (normalizedQuery) {
+    const numericQuery = Number(normalizedQuery);
+    const numericFilters = Number.isFinite(numericQuery)
+      ? [
+          { stock: Math.trunc(numericQuery) },
+          { price: new Prisma.Decimal(numericQuery) }
+        ]
+      : [];
+
+    andConditions.push({
+      OR: [
+        { skuInternal: { contains: normalizedQuery, mode: "insensitive" } },
+        { sellerCustomField: { contains: normalizedQuery, mode: "insensitive" } },
+        { title: { contains: normalizedQuery, mode: "insensitive" } },
+        { mlItemId: { contains: normalizedQuery, mode: "insensitive" } },
+        { extraData: { path: ["descripcion_local"], string_contains: normalizedQuery } },
+        { extraData: { path: ["descripcion_ml"], string_contains: normalizedQuery } },
+        { extraData: { path: ["descripcion"], string_contains: normalizedQuery } },
+        { extraData: { path: ["descripcionLocal"], string_contains: normalizedQuery } },
+        { extraData: { path: ["estatus_interno"], string_contains: normalizedQuery } },
+        { extraData: { path: ["origen"], string_contains: normalizedQuery } },
+        { extraData: { path: ["coche"], string_contains: normalizedQuery } },
+        { extraData: { path: ["pieza"], string_contains: normalizedQuery } },
+        { extraData: { path: ["marca"], string_contains: normalizedQuery } },
+        { extraData: { path: ["ano_desde"], string_contains: normalizedQuery } },
+        { extraData: { path: ["ano_hasta"], string_contains: normalizedQuery } },
+        { extraData: { path: ["ubicacion"], string_contains: normalizedQuery } },
+        { extraData: { path: ["inventario"], string_contains: normalizedQuery } },
+        { extraData: { path: ["revision"], string_contains: normalizedQuery } },
+        { extraData: { path: ["facebook"], string_contains: normalizedQuery } },
+        { extraData: { path: ["prestado_vendido_a"], string_contains: normalizedQuery } },
+        { extraData: { path: ["fecha_prestamo_pago"], string_contains: normalizedQuery } },
+        ...numericFilters
+      ]
+    });
+  }
+
+  const pieceValue = filters?.piece?.trim();
+  if (pieceValue) {
+    const candidates = buildStringCandidates(pieceValue);
+    andConditions.push({
+      OR: candidates.flatMap((candidate) => [
+        { extraData: { path: ["pieza"], equals: candidate } },
+        { extraData: { path: ["descripcion"], string_contains: candidate } },
+        { extraData: { path: ["descripcion_local"], string_contains: candidate } },
+        { extraData: { path: ["descripcionLocal"], string_contains: candidate } }
+      ])
+    });
+  }
+
+  const brandValue = filters?.brand?.trim();
+  if (brandValue) {
+    const candidates = buildStringCandidates(brandValue);
+    andConditions.push({
+      OR: candidates.flatMap((candidate) => [
+        { extraData: { path: ["marca"], equals: candidate } },
+        { extraData: { path: ["marca_nombre"], equals: candidate } },
+        { extraData: { path: ["brand"], equals: candidate } }
+      ])
+    });
+  }
+
+  const vehicleValue = filters?.vehicle?.trim();
+  if (vehicleValue) {
+    const candidates = buildStringCandidates(vehicleValue);
+    andConditions.push({
+      OR: candidates.flatMap((candidate) => [
+        { extraData: { path: ["coche"], equals: candidate } },
+        { extraData: { path: ["modelo"], equals: candidate } },
+        { extraData: { path: ["vehiculo"], equals: candidate } }
+      ])
+    });
+  }
+
+  const yearValue = filters?.year?.trim();
+  if (yearValue) {
+    andConditions.push({
+      OR: [
+        { extraData: { path: ["ano_desde"], equals: yearValue } },
+        { extraData: { path: ["ano_hasta"], equals: yearValue } },
+        { extraData: { path: ["anoDesde"], equals: yearValue } },
+        { extraData: { path: ["anoHasta"], equals: yearValue } }
+      ]
+    });
+  }
+
+  const statusValue = filters?.status?.trim();
+  if (statusValue) {
+    if (statusValue.toUpperCase() === "SIN ESTATUS") {
+      andConditions.push({
+        OR: [
+          { extraData: { path: ["estatus_interno"], equals: Prisma.JsonNull } },
+          { extraData: { path: ["estatus_interno"], equals: "" } },
+          { extraData: { equals: Prisma.JsonNull } }
+        ]
+      });
+    } else {
+      const candidates = buildStringCandidates(statusValue);
+      andConditions.push({
+        OR: candidates.map((candidate) => ({
+          extraData: { path: ["estatus_interno"], equals: candidate }
+        }))
+      });
+    }
+  }
+
+  if (!andConditions.length) {
+    return baseWhere ?? {};
+  }
+
+  return { AND: andConditions } satisfies Prisma.InventoryItemWhereInput;
+};
+
 export async function GET(req: Request) {
   const session = await auth();
   if (!session?.user?.id) return NextResponse.json({ error: "No autorizado" }, { status: 401 });
 
   const role = (session.user.role ?? "").toLowerCase();
-  const where = role === "viewer" ? { ownerId: session.user.id } : undefined;
+  const baseWhere = role === "viewer" ? { ownerId: session.user.id } : undefined;
 
   const { searchParams } = new URL(req.url);
   const { page, pageSize, skip } = parsePagination(searchParams);
+  const filters: InventoryFilters = {
+    query: searchParams.get("query"),
+    piece: searchParams.get("piece"),
+    brand: searchParams.get("brand"),
+    vehicle: searchParams.get("vehicle"),
+    year: searchParams.get("year"),
+    status: searchParams.get("status")
+  };
+  const where = buildFiltersWhere(filters, baseWhere);
 
   const [items, total] = await Promise.all([
     prisma.inventoryItem.findMany({
@@ -146,6 +293,7 @@ export async function POST(req: Request) {
       console.error("Error al crear auditLog de inventario", logErr);
     }
 
+    revalidateTag(INVENTORY_SNAPSHOT_TAG);
     return NextResponse.json(serializeInventoryItem(item, { includePhotos: true }), { status: 201 });
   } catch (err: any) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
@@ -196,6 +344,8 @@ export async function DELETE(req: Request) {
       metadata: { count: result.count, ids }
     }
   });
+
+  revalidateTag(INVENTORY_SNAPSHOT_TAG);
 
   return NextResponse.json({ deleted: result.count });
 }
@@ -392,6 +542,8 @@ export async function PATCH(req: Request) {
       }
     }
   });
+
+  revalidateTag(INVENTORY_SNAPSHOT_TAG);
 
   return NextResponse.json({
     ...serializeInventoryItem(item),

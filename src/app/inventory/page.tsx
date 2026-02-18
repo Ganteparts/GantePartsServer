@@ -5,14 +5,14 @@ import { InventoryClient } from "./client";
 import type { InventoryClientItem, InventoryInitialPage } from "./client";
 import { getInventorySnapshot } from "@/lib/inventory-cache";
 
-const DEFAULT_FULL_PAGE_SIZE = 2000;
-const INVENTORY_FULL_PAGE_SIZE_ENV = Number(process.env.INVENTORY_FULL_LOAD_LIMIT ?? `${DEFAULT_FULL_PAGE_SIZE}`);
+const INVENTORY_FULL_PAGE_SIZE_ENV = Number(process.env.INVENTORY_FULL_LOAD_LIMIT);
 const INVENTORY_FULL_PAGE_SIZE =
   Number.isFinite(INVENTORY_FULL_PAGE_SIZE_ENV) && INVENTORY_FULL_PAGE_SIZE_ENV > 0
     ? INVENTORY_FULL_PAGE_SIZE_ENV
-    : DEFAULT_FULL_PAGE_SIZE;
+    : null;
 
 export default async function InventoryPage() {
+  const startedAt = Date.now();
   const session = await auth();
   if (!session?.user?.id) {
     redirect("/login");
@@ -22,7 +22,12 @@ export default async function InventoryPage() {
   const ownerId = role === "viewer" ? session.user.id : null;
   const { items, total } = await getInventorySnapshot(ownerId, INVENTORY_FULL_PAGE_SIZE);
   const plainItems = items as InventoryClientItem[];
-  const initialPageSize = plainItems.length || INVENTORY_FULL_PAGE_SIZE;
+  const initialPageSize = plainItems.length;
+
+  const elapsedMs = Date.now() - startedAt;
+  console.log(
+    `[inventory] page render ${elapsedMs}ms items=${plainItems.length} total=estimated role=${role}`
+  );
 
   const initialPage: InventoryInitialPage = {
     items: plainItems,

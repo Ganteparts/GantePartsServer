@@ -5,15 +5,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { PublicInventoryListItem, PublicInventoryPaginatedResult } from "@/lib/public-inventory";
 
-type PhotoModalState = {
-  itemId: string;
-  photos: string[];
-  index: number;
-  title: string;
-};
-
 type PublicInventoryClientProps = {
   initialPage: PublicInventoryPaginatedResult;
+  statusSummary?: StatusSummaryEntry[];
+};
+
+type StatusSummaryEntry = {
+  label: string;
+  count: number;
 };
 
 const formatCurrencyMx = (value: number | null) => {
@@ -44,12 +43,12 @@ const getPieceName = (item: PublicInventoryListItem) => {
 
 const getBrand = (item: PublicInventoryListItem) => {
   const raw = readExtraValue(item.extraData, ["marca", "marca_nombre", "brand", "marcaVehiculo"]);
-  return raw ? raw.toUpperCase() : null;
+  return raw || null;
 };
 
 const getVehicle = (item: PublicInventoryListItem) => {
   const raw = readExtraValue(item.extraData, ["coche", "modelo", "vehiculo"]);
-  return raw ? raw.toUpperCase() : null;
+  return raw || null;
 };
 
 const getYearRange = (item: PublicInventoryListItem) => {
@@ -115,198 +114,93 @@ const getQueryHaystack = (item: PublicInventoryListItem) => {
   return chunks.join(" ").toLowerCase();
 };
 
-const getPreviewPhoto = (item: PublicInventoryListItem, cached: string[] | undefined) => {
-  if (cached && cached.length) return cached[0];
-  return item.photoPreview ?? null;
+const sanitizePhotoResponse = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+        .filter((entry) => entry.length)
+    )
+  );
 };
 
-export function PublicInventoryClient({ initialPage }: PublicInventoryClientProps) {
+const formatPhotoCount = (count: number | null | undefined) => {
+  if (!count) return "Sin fotos";
+  if (count === 1) return "1 foto";
+  return `${count} fotos`;
+};
+
+const formatUpdatedAt = (value?: string | null) => {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "-";
+  return new Intl.DateTimeFormat("es-MX", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric"
+  }).format(parsed);
+};
+
+export function PublicInventoryClient({ initialPage, statusSummary }: PublicInventoryClientProps) {
   const [query, setQuery] = useState("");
+  const [pieceFilter, setPieceFilter] = useState("ALL");
   const [brandFilter, setBrandFilter] = useState("ALL");
   const [vehicleFilter, setVehicleFilter] = useState("ALL");
   const [yearFilter, setYearFilter] = useState("ALL");
-  const [pieceFilter, setPieceFilter] = useState("ALL");
-  const [photoModal, setPhotoModal] = useState<PhotoModalState | null>(null);
-  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
-  const [items, setItems] = useState<PublicInventoryListItem[]>(initialPage.items);
-  const [totalItems, setTotalItems] = useState(initialPage.total);
-  const [currentPage, setCurrentPage] = useState(initialPage.page);
-  const [pageSize] = useState(initialPage.pageSize);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
-  const [photoCache, setPhotoCache] = useState<Record<string, string[]>>({});
-  const [photoErrorIds, setPhotoErrorIds] = useState<Set<string>>(new Set());
-  const [photoLoadingId, setPhotoLoadingId] = useState<string | null>(null);
-  const [photoStatus, setPhotoStatus] = useState<{ itemId: string | null; message: string | null }>({ itemId: null, message: null });
 
-  useEffect(() => {
-    setItems(initialPage.items);
-    setTotalItems(initialPage.total);
-    setCurrentPage(initialPage.page);
-    setPhotoCache({});
-    setListError(null);
-  }, [initialPage]);
+  const items = initialPage.items;
+  const totalItems = items.length;
 
-  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
-  const itemsLoaded = items.length;
+  const [viewerItem, setViewerItem] = useState<PublicInventoryListItem | null>(null);
+  const [viewerPhotos, setViewerPhotos] = useState<string[]>([]);
+  const [viewerIndex, setViewerIndex] = useState(0);
+  const [viewerStatus, setViewerStatus] = useState<{ isLoading: boolean; error: string | null }>({
+    isLoading: false,
+    error: null
+  });
 
-  const fetchPage = useCallback(
-    async (pageToFetch: number) => {
-      const response = await fetch(`/api/public-inventory?page=${pageToFetch}&pageSize=${pageSize}`, {
-        cache: "no-store"
-      });
-      if (!response.ok) {
-        throw new Error("No pudimos cargar la página solicitada");
-      }
-      return (await response.json()) as PublicInventoryPaginatedResult;
-    },
-    [pageSize]
-  );
+  const openPhotoViewer = useCallback((item: PublicInventoryListItem) => {
+    setViewerItem(item);
+    setViewerPhotos(item.photoPreview ? [item.photoPreview] : []);
+    setViewerIndex(0);
+    setViewerStatus({ isLoading: true, error: null });
+  }, []);
 
-  const appendItems = useCallback((nextItems: PublicInventoryListItem[]) => {
-    setItems((prev) => {
-      const seen = new Set(prev.map((item) => item.id));
-      const merged = [...prev];
-      nextItems.forEach((item) => {
-        if (!seen.has(item.id)) {
-          seen.add(item.id);
-          merged.push(item);
-        }
-      });
-      return merged;
+  const closePhotoViewer = useCallback(() => {
+    setViewerItem(null);
+    setViewerPhotos([]);
+    setViewerIndex(0);
+    setViewerStatus({ isLoading: false, error: null });
+  }, []);
+
+  const pieceOptions = useMemo(() => {
+    const set = new Set<string>();
+    items.forEach((item) => {
+      const piece = getPieceName(item);
+      if (piece) set.add(piece);
     });
-  }, []);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [items]);
 
-  const loadMoreItems = useCallback(async () => {
-    if (loadingMore) return;
-    const nextPage = currentPage + 1;
-    if (nextPage > totalPages) return;
-    setLoadingMore(true);
-    try {
-      const nextData = await fetchPage(nextPage);
-      appendItems(nextData.items);
-      setCurrentPage(nextPage);
-      setTotalItems(nextData.total);
-      setListError(null);
-    } catch (error) {
-      console.error(error);
-      setListError("No pudimos cargar más piezas. Intenta de nuevo.");
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [appendItems, currentPage, fetchPage, loadingMore, totalPages]);
-
-  const ensurePhotos = useCallback(
-    async (item: PublicInventoryListItem) => {
-      if (photoErrorIds.has(item.id)) {
-        return [];
-      }
-      const cached = photoCache[item.id];
-      if (cached) return cached;
-      setPhotoLoadingId(item.id);
-      setPhotoStatus({ itemId: null, message: null });
-      try {
-        const response = await fetch(`/api/public-inventory/${item.id}/photos`, { cache: "no-store", method: "GET" });
-        if (!response.ok) {
-          throw new Error(`REQUEST_FAILED_${response.status}`);
-        }
-        const data = (await response.json()) as { photos?: unknown };
-        const list = Array.isArray(data.photos)
-          ? data.photos
-              .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-              .filter((entry): entry is string => entry.length > 0)
-          : [];
-        if (!list.length) {
-          throw new Error("EMPTY_PHOTOS");
-        }
-        setPhotoCache((prev) => ({ ...prev, [item.id]: list }));
-        return list;
-      } catch (error) {
-        console.error("Public inventory photos error", error);
-        setPhotoStatus({ itemId: item.id, message: "No pudimos cargar las fotos" });
-        setPhotoErrorIds((prev) => new Set(prev).add(item.id));
-        return [];
-      } finally {
-        setPhotoLoadingId((current) => (current === item.id ? null : current));
-      }
-    },
-    [photoCache, photoErrorIds]
-  );
-
-  const openPhotoModal = useCallback(
-    async (item: PublicInventoryListItem, startIndex = 0) => {
-      const photos = await ensurePhotos(item);
-      if (!photos.length) return;
-      const safeIndex = Math.min(Math.max(startIndex, 0), photos.length - 1);
-      setPhotoModal({ itemId: item.id, photos, index: safeIndex, title: getPieceName(item) });
-    },
-    [ensurePhotos]
-  );
-
-  const closePhotoModal = useCallback(() => {
-    setPhotoModal(null);
-  }, []);
-
-  const goToNextPhoto = useCallback(() => {
-    setPhotoModal((prev) => {
-      if (!prev) return prev;
-      const nextIndex = (prev.index + 1) % prev.photos.length;
-      return { ...prev, index: nextIndex };
-    });
-  }, []);
-
-  const goToPrevPhoto = useCallback(() => {
-    setPhotoModal((prev) => {
-      if (!prev) return prev;
-      const nextIndex = (prev.index - 1 + prev.photos.length) % prev.photos.length;
-      return { ...prev, index: nextIndex };
-    });
-  }, []);
-
-  const jumpToPhoto = useCallback((index: number) => {
-    setPhotoModal((prev) => {
-      if (!prev) return prev;
-      const safeIndex = Math.min(Math.max(index, 0), prev.photos.length - 1);
-      return { ...prev, index: safeIndex };
-    });
-  }, []);
-
-  useEffect(() => {
-    if (!photoModal) return;
-    const handleKeydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closePhotoModal();
-      } else if (event.key === "ArrowRight") {
-        event.preventDefault();
-        goToNextPhoto();
-      } else if (event.key === "ArrowLeft") {
-        event.preventDefault();
-        goToPrevPhoto();
-      }
-    };
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", handleKeydown);
-    return () => {
-      document.body.style.overflow = originalOverflow;
-      window.removeEventListener("keydown", handleKeydown);
-    };
-  }, [photoModal, closePhotoModal, goToNextPhoto, goToPrevPhoto]);
+  const itemsByPiece = useMemo(() => {
+    if (pieceFilter === "ALL") return items;
+    return items.filter((item) => getPieceName(item) === pieceFilter);
+  }, [items, pieceFilter]);
 
   const brandOptions = useMemo(() => {
     const set = new Set<string>();
-    items.forEach((item) => {
+    itemsByPiece.forEach((item) => {
       const brand = getBrand(item);
       if (brand) set.add(brand);
     });
-    return Array.from(set).sort();
-  }, [items]);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [itemsByPiece]);
 
   const itemsByBrand = useMemo(() => {
-    if (brandFilter === "ALL") return items;
-    return items.filter((item) => getBrand(item) === brandFilter);
-  }, [items, brandFilter]);
+    if (brandFilter === "ALL") return itemsByPiece;
+    return itemsByPiece.filter((item) => getBrand(item) === brandFilter);
+  }, [itemsByPiece, brandFilter]);
 
   const vehicleOptions = useMemo(() => {
     const set = new Set<string>();
@@ -314,7 +208,7 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
       const vehicle = getVehicle(item);
       if (vehicle) set.add(vehicle);
     });
-    return Array.from(set).sort();
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [itemsByBrand]);
 
   const itemsByVehicle = useMemo(() => {
@@ -337,44 +231,121 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
     return itemsByVehicle.filter((item) => matchesYearFilter(item, yearFilter));
   }, [itemsByVehicle, yearFilter]);
 
-  const pieceOptions = useMemo(() => {
-    const set = new Set<string>();
-    itemsByYear.forEach((item) => {
-      const piece = getPieceName(item);
-      if (piece) set.add(piece);
-    });
-    return Array.from(set).sort();
-  }, [itemsByYear]);
-
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    return itemsByYear.filter((item) => {
-      if (pieceFilter !== "ALL" && getPieceName(item) !== pieceFilter) {
-        return false;
-      }
-      const matchesQuery = !normalizedQuery || getQueryHaystack(item).includes(normalizedQuery);
-      return matchesQuery;
-    });
-  }, [itemsByYear, pieceFilter, query]);
+    if (!normalizedQuery) return itemsByYear;
+    return itemsByYear.filter((item) => getQueryHaystack(item).includes(normalizedQuery));
+  }, [itemsByYear, query]);
 
-  const statusChips = useMemo(() => {
+  const derivedStatusChips = useMemo<StatusSummaryEntry[]>(() => {
     const counter = new Map<string, number>();
     items.forEach((item) => {
       const label = getInternalStatus(item) || "SIN ESTATUS";
       counter.set(label, (counter.get(label) ?? 0) + 1);
     });
-    return Array.from(counter.entries()).sort((a, b) => b[1] - a[1]);
+    return Array.from(counter.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, count]) => ({ label, count }));
   }, [items]);
 
-  const moreItemsAvailable = currentPage < totalPages;
+  const statusChips = statusSummary?.length ? statusSummary : derivedStatusChips;
+
+  useEffect(() => {
+    if (!viewerItem) {
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    setViewerStatus({ isLoading: true, error: null });
+
+    const loadPhotos = async () => {
+      try {
+        const response = await fetch(`/api/public-inventory/${viewerItem.id}/photos`, {
+          cache: "no-store",
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        const normalized = sanitizePhotoResponse(payload?.photos);
+        const nextPhotos = normalized.length
+          ? normalized
+          : viewerItem.photoPreview
+            ? [viewerItem.photoPreview]
+            : [];
+        if (!controller.signal.aborted) {
+          setViewerPhotos(nextPhotos);
+          setViewerIndex(0);
+          setViewerStatus({ isLoading: false, error: null });
+        }
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        console.error("No se pudieron cargar las fotos públicas", error);
+        const fallback = viewerItem.photoPreview ? [viewerItem.photoPreview] : [];
+        setViewerPhotos(fallback);
+        setViewerIndex(0);
+        setViewerStatus({ isLoading: false, error: "No se pudieron cargar las fotos. Intenta más tarde." });
+      }
+    };
+
+    loadPhotos();
+
+    return () => {
+      controller.abort();
+    };
+  }, [viewerItem]);
+
+  const showPrevPhoto = useCallback(() => {
+    setViewerIndex((current) => {
+      if (viewerPhotos.length <= 1) return current;
+      return (current - 1 + viewerPhotos.length) % viewerPhotos.length;
+    });
+  }, [viewerPhotos.length]);
+
+  const showNextPhoto = useCallback(() => {
+    setViewerIndex((current) => {
+      if (viewerPhotos.length <= 1) return current;
+      return (current + 1) % viewerPhotos.length;
+    });
+  }, [viewerPhotos.length]);
+
+  useEffect(() => {
+    if (!viewerItem) {
+      return undefined;
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePhotoViewer();
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        showPrevPhoto();
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        showNextPhoto();
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [viewerItem, closePhotoViewer, showPrevPhoto, showNextPhoto]);
+
+  const activePhoto = viewerPhotos[viewerIndex] ?? null;
+  const canNavigatePhotos = viewerPhotos.length > 1;
+  const viewerPiece = viewerItem ? getPieceName(viewerItem) : null;
+  const viewerBrand = viewerItem ? getBrand(viewerItem) : null;
+  const viewerVehicle = viewerItem ? getVehicle(viewerItem) : null;
+  const viewerYearRange = viewerItem ? getYearRange(viewerItem) : null;
+  const viewerOrigin = viewerItem ? getOrigin(viewerItem) : null;
 
   return (
-    <>
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-slate-950 text-slate-100">
       <header className="border-b border-slate-800 bg-slate-900/70 backdrop-blur">
         <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-10">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="text-xs uppercase tracking-[0.3em] text-emerald-400">Inventario Público</div>
+            <div className="text-xs uppercase tracking-[0.3em] text-emerald-400">Inventario público filtrado</div>
             <Link
               href="/"
               className="rounded-full border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-widest text-emerald-200 hover:border-emerald-300"
@@ -382,10 +353,9 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
               Volver al inicio
             </Link>
           </div>
-          <h1 className="text-3xl font-semibold text-white md:text-4xl">Vista en renglones igual a la app interna</h1>
+          <h1 className="text-3xl font-semibold text-white md:text-4xl">Piezas en ML o sin subir</h1>
           <p className="text-slate-400 md:text-lg">
-            Consulta las columnas SKU, pieza, marca, coche, año, origen, precio y fotos tal como las ves internamente, sin necesidad de
-            iniciar sesión.
+            Vista directa del inventario interno mostrando exclusivamente los artículos publicados en Mercado Libre o pendientes por subir.
           </p>
         </div>
       </header>
@@ -405,18 +375,31 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
-          <div className="mt-4 flex items-center justify-between md:hidden">
-            <span className="text-sm font-medium text-slate-300">Filtros avanzados</span>
-            <button
-              type="button"
-              onClick={() => setMobileFiltersOpen((prev) => !prev)}
-              className="rounded-full border border-slate-700 px-4 py-1 text-xs font-semibold uppercase tracking-widest text-slate-200"
-              aria-expanded={mobileFiltersOpen}
-            >
-              {mobileFiltersOpen ? "Ocultar" : "Mostrar"}
-            </button>
-          </div>
-          <div className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-4 pt-4 md:grid md:grid-cols-2 lg:grid-cols-4`}>
+          <div className="grid gap-4 pt-4 md:grid md:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <label className="text-sm text-slate-400" htmlFor="piece-filter">
+                Filtrar por pieza
+              </label>
+              <select
+                id="piece-filter"
+                className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-emerald-400"
+                value={pieceFilter}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setPieceFilter(next);
+                  setBrandFilter("ALL");
+                  setVehicleFilter("ALL");
+                  setYearFilter("ALL");
+                }}
+              >
+                <option value="ALL">Todas</option>
+                {pieceOptions.map((piece) => (
+                  <option key={piece} value={piece}>
+                    {piece}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div>
               <label className="text-sm text-slate-400" htmlFor="brand-filter">
                 Filtrar por marca
@@ -430,13 +413,12 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
                   setBrandFilter(next);
                   setVehicleFilter("ALL");
                   setYearFilter("ALL");
-                  setPieceFilter("ALL");
                 }}
               >
                 <option value="ALL">Todas</option>
                 {brandOptions.map((brand) => (
                   <option key={brand} value={brand}>
-                    {brand}
+                    {brand.toUpperCase()}
                   </option>
                 ))}
               </select>
@@ -453,13 +435,12 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
                   const next = event.target.value;
                   setVehicleFilter(next);
                   setYearFilter("ALL");
-                  setPieceFilter("ALL");
                 }}
               >
                 <option value="ALL">Todos</option>
                 {vehicleOptions.map((vehicle) => (
                   <option key={vehicle} value={vehicle}>
-                    {vehicle}
+                    {vehicle.toUpperCase()}
                   </option>
                 ))}
               </select>
@@ -472,11 +453,7 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
                 id="year-filter"
                 className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-emerald-400"
                 value={yearFilter}
-                onChange={(event) => {
-                  const next = event.target.value;
-                  setYearFilter(next);
-                  setPieceFilter("ALL");
-                }}
+                onChange={(event) => setYearFilter(event.target.value)}
               >
                 <option value="ALL">Todos</option>
                 {yearOptions.map((year) => (
@@ -486,30 +463,12 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
                 ))}
               </select>
             </div>
-            <div>
-              <label className="text-sm text-slate-400" htmlFor="piece-filter">
-                Filtrar por pieza
-              </label>
-              <select
-                id="piece-filter"
-                className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-emerald-400"
-                value={pieceFilter}
-                onChange={(event) => setPieceFilter(event.target.value)}
-              >
-                <option value="ALL">Todas</option>
-                {pieceOptions.map((piece) => (
-                  <option key={piece} value={piece}>
-                    {piece}
-                  </option>
-                ))}
-              </select>
-            </div>
           </div>
         </section>
 
         <section className="mt-8 space-y-4">
           <div className="flex flex-wrap gap-2">
-            {statusChips.map(([label, count]) => (
+            {statusChips.map(({ label, count }) => (
               <div
                 key={label}
                 className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-900/60 px-4 py-2 text-xs font-semibold tracking-widest text-slate-200"
@@ -521,245 +480,159 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-400">
             <span>
-              Mostrando <strong className="text-white">{filteredItems.length}</strong> de {totalItems} publicaciones activas
+              Mostrando <strong className="text-white">{filteredItems.length}</strong> de {totalItems} registros filtrados
             </span>
-            <span className="text-slate-500">
-              Filtrando sobre {itemsLoaded} registros cargados · {itemsLoaded < totalItems ? `Faltan ${totalItems - itemsLoaded}` : "Todo cargado"}
-            </span>
+            <span className="text-slate-500">Inventario local • Estados: ML y SIN SUBIR</span>
           </div>
-          {itemsLoaded < totalItems && (
-            <div className="text-xs text-slate-500">
-              Usa &quot;Cargar más&quot; para traer el resto sin esperar a que se descargue todo el inventario.
-            </div>
-          )}
-          {listError && <div className="text-sm text-rose-400">{listError}</div>}
-
           {filteredItems.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-12 text-center text-slate-400">
-              No encontramos piezas que coincidan con el filtro aplicado.
+              Ajusta los filtros para ver el layout en acción.
             </div>
           ) : (
             <>
-            <div className="grid gap-4 md:hidden">
-              {filteredItems.map((item) => {
-                const pieceName = getPieceName(item);
-                const brand = getBrand(item);
-                const vehicle = getVehicle(item);
-                const yearRange = getYearRange(item);
-                const origin = getOrigin(item);
-                const mlUrl = item.mlItemId ? `https://articulo.mercadolibre.com.mx/${item.mlItemId}` : null;
-                const cachedPhotos = photoCache[item.id] ?? [];
-                const previewPhoto = getPreviewPhoto(item, cachedPhotos);
-                const displayPhotoCount = cachedPhotos.length || item.photoCount || 0;
-                const hasPhotos = displayPhotoCount > 0 || Boolean(previewPhoto);
-                const isLoadingPhotos = photoLoadingId === item.id;
-                const photoMessage = photoStatus.itemId === item.id ? photoStatus.message : null;
-                const updatedLabel = (() => {
-                  const parsed = new Date(item.updatedAt);
-                  return Number.isNaN(parsed.getTime()) ? "-" : parsed.toLocaleDateString("es-MX");
-                })();
-                return (
-                  <article key={`${item.id}-mobile`} className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 shadow-md shadow-black/40">
-                    <div className="flex items-center justify-between text-xs text-slate-400">
-                      <span className="font-mono text-sm text-emerald-200">{item.skuInternal || "-"}</span>
-                      <span>Actualizado {updatedLabel}</span>
-                    </div>
-                    <div className="mt-3 flex gap-3">
-                      <div className="h-20 w-20 flex-shrink-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/60">
-                        {previewPhoto ? (
-                          <button
-                            type="button"
-                            onClick={() => openPhotoModal(item, 0)}
-                            disabled={!hasPhotos || isLoadingPhotos}
-                            className="block h-full w-full"
-                          >
-                            <img src={previewPhoto} alt={pieceName} className="h-full w-full object-cover" loading="lazy" />
-                          </button>
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center text-[10px] text-slate-500">Sin foto</div>
-                        )}
+              <div className="grid gap-4 md:hidden">
+                {filteredItems.map((item) => {
+                  const pieceName = getPieceName(item);
+                  const brand = getBrand(item);
+                  const vehicle = getVehicle(item);
+                  const yearRange = getYearRange(item);
+                  const origin = getOrigin(item);
+                  const photoCount = item.photoCount ?? 0;
+                  return (
+                    <article key={`${item.id}-mobile`} className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 shadow-md shadow-black/40">
+                      <div className="flex items-center justify-between text-xs text-slate-400">
+                        <span className="font-mono text-sm text-emerald-200">{item.skuInternal || "-"}</span>
+                        <span>Actualizado: {formatUpdatedAt(item.updatedAt)}</span>
                       </div>
-                      <div className="flex-1">
+                      <div className="mt-3">
                         <h3 className="text-lg font-semibold text-white">{pieceName}</h3>
-                        <p className="text-sm text-slate-400">{brand ?? "-"} · {vehicle ?? "-"}</p>
+                        <p className="text-sm text-slate-400">{brand ? brand.toUpperCase() : "-"} · {vehicle ? vehicle.toUpperCase() : "-"}</p>
                         <p className="text-xs text-slate-500">Años {yearRange ?? "-"}</p>
                         <p className="text-xs text-slate-500">Origen {origin || "-"}</p>
                       </div>
-                    </div>
-                    <div className="mt-3 flex items-center justify-between">
-                      <span className="text-lg font-bold text-emerald-300">{formatCurrencyMx(item.price)}</span>
-                      <span className="text-sm text-slate-400">Stock: {item.stock}</span>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-400">
-                      {mlUrl && (
-                        <a
-                          href={mlUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center rounded-full border border-emerald-500/60 px-3 py-1 text-emerald-200"
-                        >
-                          Ver en ML
-                        </a>
-                      )}
-                      {hasPhotos && (
+                      {item.photoPreview ? (
                         <button
                           type="button"
-                          onClick={() => openPhotoModal(item, 0)}
-                          disabled={isLoadingPhotos}
-                          className="rounded-full border border-slate-700 px-3 py-1 disabled:opacity-50"
+                          onClick={() => openPhotoViewer(item)}
+                          className="mt-4 block w-full overflow-hidden rounded-2xl border border-slate-800 transition hover:border-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                          aria-label={`Ver fotos de ${pieceName}`}
                         >
-                          {isLoadingPhotos ? "Cargando fotos..." : `Ver ${displayPhotoCount || ""} fotos`}
-                        </button>
-                      )}
-                      {photoMessage && <span className="text-xs text-rose-400">{photoMessage}</span>}
-                      {item.sellerCustomField && <span className="rounded-full border border-slate-700 px-3 py-1">{item.sellerCustomField}</span>}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-            <div className="hidden overflow-auto rounded-2xl border border-slate-800 bg-slate-950/30 shadow-inner shadow-black/40 md:block">
-              <table className="min-w-[1100px] w-full border-collapse text-sm">
-                <thead className="bg-slate-900/60 text-xs font-semibold uppercase tracking-widest text-slate-400">
-                  <tr>
-                    <th className="px-4 py-3 text-left">SKU</th>
-                    <th className="px-4 py-3 text-left">Pieza</th>
-                    <th className="px-4 py-3 text-left">Marca</th>
-                    <th className="px-4 py-3 text-left">Coche</th>
-                    <th className="px-4 py-3 text-left">Año</th>
-                    <th className="px-4 py-3 text-left">Origen</th>
-                    <th className="px-4 py-3 text-right">Precio</th>
-                    <th className="px-4 py-3 text-left">Fotos</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredItems.map((item) => {
-                    const brand = getBrand(item);
-                    const vehicle = getVehicle(item);
-                    const yearRange = getYearRange(item);
-                    const origin = getOrigin(item);
-                    const mlUrl = item.mlItemId ? `https://articulo.mercadolibre.com.mx/${item.mlItemId}` : null;
-                    const cachedPhotos = photoCache[item.id] ?? [];
-                    const previewPhoto = getPreviewPhoto(item, cachedPhotos);
-                    const extraPreview = cachedPhotos.slice(1, 4);
-                    const extraCount = Math.max(0, cachedPhotos.length - (1 + extraPreview.length));
-                    const hasPhotos = (item.photoCount ?? 0) > 0 || Boolean(previewPhoto);
-                    const isLoadingPhotos = photoLoadingId === item.id;
-                    const displayPhotoCount = cachedPhotos.length || item.photoCount || 0;
-                    const photoMessage = photoStatus.itemId === item.id ? photoStatus.message : null;
-                    const pieceName = getPieceName(item);
-                    const updatedLabel = (() => {
-                      const parsed = new Date(item.updatedAt);
-                      return Number.isNaN(parsed.getTime()) ? "-" : parsed.toLocaleDateString("es-MX");
-                    })();
-                    return (
-                      <tr key={item.id} className="border-t border-slate-900/80 bg-slate-900/30 transition hover:bg-slate-900/70">
-                        <td className="whitespace-nowrap px-4 py-4 align-middle">
-                          <div className="flex items-center gap-3">
-                            <span className="font-mono text-sm text-emerald-200">{item.skuInternal || "-"}</span>
-                            {mlUrl && (
-                              <a
-                                href={mlUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="rounded-full border border-emerald-500/60 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold uppercase text-emerald-200"
-                              >
-                                ML
-                              </a>
+                          <div className="relative">
+                            <img
+                              src={item.photoPreview}
+                              alt={`Vista previa de ${pieceName}`}
+                              className="h-48 w-full cursor-zoom-in object-cover"
+                              loading="lazy"
+                            />
+                            {photoCount > 1 && (
+                              <span className="absolute bottom-2 right-2 rounded-full bg-black/70 px-3 py-1 text-xs font-semibold text-white">
+                                +{photoCount - 1}
+                              </span>
                             )}
                           </div>
-                          <div className="text-xs text-slate-500">Actualizado {updatedLabel}</div>
-                        </td>
-                        <td className="min-w-[220px] px-4 py-4 align-top">
-                          <div className="font-semibold text-white">{pieceName}</div>
-                          {item.sellerCustomField && (
-                            <div className="text-xs text-slate-500">Ubicación: {item.sellerCustomField}</div>
+                        </button>
+                      ) : (
+                        <div className="mt-4 rounded-2xl border border-dashed border-slate-800 px-4 py-8 text-center text-xs text-slate-500">
+                          {photoCount > 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => openPhotoViewer(item)}
+                              className="font-semibold text-emerald-300 underline-offset-4 hover:underline"
+                            >
+                              Ver fotos
+                            </button>
+                          ) : (
+                            "Sin foto disponible"
                           )}
-                        </td>
-                        <td className="px-4 py-4 font-semibold text-slate-100">{brand ?? "-"}</td>
-                        <td className="px-4 py-4 text-slate-200">{vehicle ?? "-"}</td>
-                        <td className="px-4 py-4 text-slate-200">{yearRange ?? "-"}</td>
-                        <td className="px-4 py-4 text-slate-200">{origin || "-"}</td>
-                        <td className="px-4 py-4 text-right font-bold text-emerald-300">{formatCurrencyMx(item.price)}</td>
-                        <td className="px-4 py-4">
-                          <div className="flex items-center gap-3">
-                            <div className="h-16 w-16 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/60">
-                                  {previewPhoto ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => openPhotoModal(item, 0)}
-                                      disabled={!hasPhotos || isLoadingPhotos}
-                                      className="group relative block h-full w-full disabled:opacity-50"
-                                    >
-                                      <img src={previewPhoto} alt={item.title ?? "Foto principal"} className="h-full w-full object-cover" loading="lazy" />
-                                      <span className="pointer-events-none absolute inset-0 bg-black/30 opacity-0 transition group-hover:opacity-100" />
-                                    </button>
-                                  ) : (
-                                    <div className="flex h-full w-full items-center justify-center text-[10px] text-slate-500">Sin foto</div>
-                                  )}
-                            </div>
-                            {extraPreview.length > 0 && (
-                              <div className="flex items-center gap-2">
-                                <div className="flex -space-x-2">
-                                  {extraPreview.map((photo, index) => (
-                                    <button
-                                      type="button"
-                                      key={`${item.id}-thumb-${index}`}
-                                      onClick={() => openPhotoModal(item, index + 1)}
-                                      className="h-10 w-10 overflow-hidden rounded-full border border-slate-800"
-                                    >
-                                      <img
-                                        src={photo}
-                                        alt="Foto adicional"
-                                        className="h-full w-full object-cover"
-                                        loading="lazy"
-                                      />
-                                    </button>
-                                  ))}
-                                </div>
-                                {extraCount > 0 && (
-                                  <button
-                                    type="button"
-                                    onClick={() => openPhotoModal(item, cachedPhotos.length - extraCount)}
-                                    className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-slate-900/70 text-[11px] font-semibold text-slate-300"
-                                  >
-                                    +{extraCount}
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                            {photoMessage && <div className="text-xs text-rose-400">{photoMessage}</div>}
-                            {hasPhotos && !cachedPhotos.length && displayPhotoCount > 0 && (
+                        </div>
+                      )}
+                      <div className="mt-3 flex items-center justify-between">
+                        <span className="text-lg font-bold text-emerald-300">{formatCurrencyMx(item.price)}</span>
+                        <span className="text-sm text-slate-400">{formatPhotoCount(photoCount)} · Stock: {item.stock}</span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+              <div className="hidden overflow-auto rounded-2xl border border-slate-800 bg-slate-950/30 shadow-inner shadow-black/40 md:block">
+                <table className="min-w-[1100px] w-full border-collapse text-sm">
+                  <thead className="bg-slate-900/60 text-xs font-semibold uppercase tracking-widest text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3 text-left">SKU</th>
+                      <th className="px-4 py-3 text-left">Fotos</th>
+                      <th className="px-4 py-3 text-left">Pieza</th>
+                      <th className="px-4 py-3 text-left">Marca</th>
+                      <th className="px-4 py-3 text-left">Coche</th>
+                      <th className="px-4 py-3 text-left">Año</th>
+                      <th className="px-4 py-3 text-left">Origen</th>
+                      <th className="px-4 py-3 text-right">Precio</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredItems.map((item) => {
+                      const brand = getBrand(item);
+                      const vehicle = getVehicle(item);
+                      const yearRange = getYearRange(item);
+                      const origin = getOrigin(item);
+                      const pieceName = getPieceName(item);
+                      const photoCount = item.photoCount ?? 0;
+                      return (
+                        <tr key={item.id} className="border-t border-slate-900/80 bg-slate-900/30">
+                          <td className="whitespace-nowrap px-4 py-4 align-middle">
+                            <div className="font-mono text-sm text-emerald-200">{item.skuInternal || "-"}</div>
+                            <div className="text-xs text-slate-500">Actualizado: {formatUpdatedAt(item.updatedAt)}</div>
+                          </td>
+                          <td className="px-4 py-4">
+                            {item.photoPreview ? (
                               <button
                                 type="button"
-                                onClick={() => openPhotoModal(item, 0)}
-                                disabled={isLoadingPhotos}
-                                className="text-xs text-emerald-300 underline-offset-2 hover:underline disabled:opacity-50"
+                                onClick={() => openPhotoViewer(item)}
+                                className="flex items-center gap-3 rounded-2xl border border-transparent px-2 py-1 transition hover:border-emerald-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                                aria-label={`Ver fotos de ${pieceName}`}
                               >
-                                {isLoadingPhotos ? "Cargando fotos..." : `Ver ${displayPhotoCount} fotos`}
+                                <div className="relative h-16 w-16 overflow-hidden rounded-2xl border border-slate-800">
+                                  <img
+                                    src={item.photoPreview}
+                                    alt={`Vista previa de ${pieceName}`}
+                                    className="h-full w-full cursor-zoom-in object-cover"
+                                    loading="lazy"
+                                  />
+                                  {photoCount > 1 && (
+                                    <span className="absolute bottom-1 right-1 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-semibold text-white">
+                                      +{photoCount - 1}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs text-slate-400">{formatPhotoCount(photoCount)}</div>
                               </button>
+                            ) : photoCount > 0 ? (
+                              <button
+                                type="button"
+                                onClick={() => openPhotoViewer(item)}
+                                className="rounded-full border border-emerald-400/50 px-3 py-1 text-xs font-semibold text-emerald-200 hover:border-emerald-300"
+                              >
+                                Ver fotos ({photoCount})
+                              </button>
+                            ) : (
+                              <div className="text-xs text-slate-500">Sin foto disponible</div>
                             )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          </td>
+                          <td className="min-w-[220px] px-4 py-4 align-top">
+                            <div className="font-semibold text-white">{pieceName}</div>
+                            {item.sellerCustomField && <div className="text-xs text-slate-500">Ubicación: {item.sellerCustomField}</div>}
+                          </td>
+                          <td className="px-4 py-4 font-semibold text-slate-100">{brand ? brand.toUpperCase() : "-"}</td>
+                          <td className="px-4 py-4 text-slate-200">{vehicle ? vehicle.toUpperCase() : "-"}</td>
+                          <td className="px-4 py-4 text-slate-200">{yearRange ?? "-"}</td>
+                          <td className="px-4 py-4 text-slate-200">{origin || "-"}</td>
+                          <td className="px-4 py-4 text-right font-bold text-emerald-300">{formatCurrencyMx(item.price)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </>
-          )}
-          {moreItemsAvailable && (
-            <div className="mt-6 flex justify-center">
-              <button
-                type="button"
-                onClick={loadMoreItems}
-                disabled={loadingMore}
-                className="rounded-full border border-emerald-500/50 bg-emerald-500/10 px-6 py-2 text-sm font-semibold uppercase tracking-widest text-emerald-200 disabled:opacity-50"
-              >
-                {loadingMore ? "Cargando..." : `Cargar más (${itemsLoaded}/${totalItems})`}
-              </button>
-            </div>
           )}
         </section>
 
@@ -772,70 +645,85 @@ export function PublicInventoryClient({ initialPage }: PublicInventoryClientProp
           </Link>
         </div>
       </main>
-      </div>
 
-      {photoModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 px-4 py-8" role="dialog" aria-modal="true">
-          <div className="absolute inset-0" onClick={closePhotoModal} />
-          <div className="relative z-10 w-full max-w-5xl rounded-2xl border border-slate-800 bg-slate-900/80 p-6 shadow-2xl shadow-black/70">
-            <button
-              type="button"
-              onClick={closePhotoModal}
-              className="absolute right-4 top-4 rounded-full border border-slate-700 bg-slate-800/80 px-3 py-1 text-xs font-semibold uppercase text-slate-200"
-            >
-              Cerrar
-            </button>
-            <div className="flex items-center gap-4">
-              <button
-                type="button"
-                onClick={goToPrevPhoto}
-                className="hidden rounded-full border border-slate-700 bg-slate-800/80 p-3 text-white transition hover:border-emerald-400 hover:text-emerald-300 sm:block"
-                aria-label="Foto anterior"
-              >
-                ‹
-              </button>
-              <div className="flex-1">
-                <img
-                  src={photoModal.photos[photoModal.index]}
-                  alt={photoModal.title}
-                  className="max-h-[70vh] w-full rounded-xl object-contain"
-                  loading="lazy"
-                />
-                <div className="mt-4 text-center text-sm font-semibold text-white">{photoModal.title}</div>
-                <div className="text-center text-xs uppercase tracking-widest text-slate-400">
-                  Foto {photoModal.index + 1} de {photoModal.photos.length}
-                </div>
+      {viewerItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-8">
+          <button
+            type="button"
+            aria-label="Cerrar visor de fotos"
+            className="absolute inset-0 bg-slate-950/80"
+            onClick={closePhotoViewer}
+          />
+          <div className="relative z-10 w-full max-w-5xl rounded-3xl border border-slate-800 bg-slate-950/95 p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Galería de fotos</p>
+                <h2 className="text-2xl font-semibold text-white">{viewerPiece ?? "Detalle de pieza"}</h2>
+                <p className="text-sm text-slate-400">
+                  {viewerItem.skuInternal || "-"} · {viewerBrand ? viewerBrand.toUpperCase() : "-"} · {viewerVehicle ? viewerVehicle.toUpperCase() : "-"}
+                </p>
+                <p className="text-xs text-slate-500">{viewerYearRange ?? "-"} · {viewerOrigin || "Sin origen"}</p>
               </div>
               <button
                 type="button"
-                onClick={goToNextPhoto}
-                className="hidden rounded-full border border-slate-700 bg-slate-800/80 p-3 text-white transition hover:border-emerald-400 hover:text-emerald-300 sm:block"
-                aria-label="Foto siguiente"
+                onClick={closePhotoViewer}
+                className="rounded-full border border-slate-700 px-3 py-1 text-sm text-slate-200 hover:border-emerald-400 hover:text-emerald-200"
               >
-                ›
+                Cerrar
               </button>
             </div>
-            <div className="mt-4 flex justify-center gap-2">
-              {photoModal.photos.map((photo, idx) => (
-                <button
-                  key={`${photo}-${idx}`}
-                  type="button"
-                  onClick={() => jumpToPhoto(idx)}
-                  className={`h-12 w-12 overflow-hidden rounded-lg border ${
-                    idx === photoModal.index ? "border-emerald-400" : "border-slate-700"
-                  }`}
-                >
-                  <img src={photo} alt="Miniatura" className="h-full w-full object-cover" loading="lazy" />
-                </button>
-              ))}
+            <div className="relative mt-4 aspect-[4/3] w-full overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
+              {viewerStatus.isLoading ? (
+                <div className="flex h-full items-center justify-center text-sm text-slate-400">Cargando fotos...</div>
+              ) : activePhoto ? (
+                <img src={activePhoto} alt={`Foto de ${viewerPiece ?? "pieza"}`} className="h-full w-full object-contain" loading="lazy" />
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm text-slate-500">Sin fotos disponibles</div>
+              )}
+              {canNavigatePhotos && activePhoto && (
+                <>
+                  <button
+                    type="button"
+                    onClick={showPrevPhoto}
+                    className="absolute left-4 top-1/2 -translate-y-1/2 rounded-full bg-black/60 px-3 py-2 text-2xl text-white hover:bg-black/80"
+                    aria-label="Foto anterior"
+                  >
+                    ‹
+                  </button>
+                  <button
+                    type="button"
+                    onClick={showNextPhoto}
+                    className="absolute right-4 top-1/2 -translate-y-1/2 rounded-full bg-black/60 px-3 py-2 text-2xl text-white hover:bg-black/80"
+                    aria-label="Foto siguiente"
+                  >
+                    ›
+                  </button>
+                </>
+              )}
             </div>
-            <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
-              <span>Usa ← → o da clic en las miniaturas</span>
-              <span>Esc para cerrar</span>
+            {viewerStatus.error && <p className="mt-3 text-sm text-amber-300">{viewerStatus.error}</p>}
+            {viewerPhotos.length > 1 && (
+              <div className="mt-4 flex gap-2 overflow-x-auto pb-2">
+                {viewerPhotos.map((photo, index) => (
+                  <button
+                    key={`${photo}-${index}`}
+                    type="button"
+                    onClick={() => setViewerIndex(index)}
+                    className={`h-16 w-16 flex-shrink-0 overflow-hidden rounded-xl border ${
+                      viewerIndex === index ? "border-emerald-400" : "border-slate-700"
+                    }`}
+                  >
+                    <img src={photo} alt={`Miniatura ${index + 1}`} className="h-full w-full object-cover" loading="lazy" />
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="mt-3 text-center text-xs text-slate-400">
+              {viewerPhotos.length ? `Foto ${viewerIndex + 1} de ${viewerPhotos.length}` : "Sin fotos para mostrar"}
             </div>
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }

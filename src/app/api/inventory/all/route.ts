@@ -6,7 +6,8 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { INVENTORY_LIST_SELECT, serializeInventoryItem } from "@/lib/inventory-serialization";
 
-const FULL_LOAD_LIMIT = Number(process.env.INVENTORY_FULL_LOAD_LIMIT ?? "2000");
+const parsedLimit = Number(process.env.INVENTORY_FULL_LOAD_LIMIT);
+const FULL_LOAD_LIMIT = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : null;
 
 export async function GET() {
   const session = await auth();
@@ -22,13 +23,13 @@ export async function GET() {
     return NextResponse.json({ total: 0, items: [] });
   }
 
-  const shouldTruncate = total > FULL_LOAD_LIMIT;
-  const take = shouldTruncate ? FULL_LOAD_LIMIT : total;
+  const shouldTruncate = FULL_LOAD_LIMIT !== null && total > FULL_LOAD_LIMIT;
+  const take = shouldTruncate ? FULL_LOAD_LIMIT : undefined;
 
   const items = await prisma.inventoryItem.findMany({
     where,
     orderBy: { updatedAt: "desc" },
-    take,
+    ...(typeof take === "number" ? { take } : {}),
     select: INVENTORY_LIST_SELECT
   });
 

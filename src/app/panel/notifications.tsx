@@ -9,9 +9,16 @@ type NotificationItem = {
   itemId?: string | null;
   status?: string | null;
   success: boolean;
+  pieceName?: string | null;
+  orderNumber?: string | null;
+  vehicleName?: string | null;
+  yearRange?: string | null;
 };
 
 const POLL_INTERVAL = 20000;
+const VISIBLE_ROW_COUNT = 5;
+const ROW_HEIGHT_PX = 72;
+const PANEL_SCROLL_HEIGHT = VISIBLE_ROW_COUNT * ROW_HEIGHT_PX;
 
 const statusBadgeClass = (status?: string | null) => {
   switch ((status ?? "").toLowerCase()) {
@@ -44,6 +51,15 @@ const shouldToast = (status?: string | null) => {
   return normalized === "paused" || normalized === "inactive";
 };
 
+const formatAbsoluteDate = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("es-MX", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  });
+};
+
 export default function PanelNotifications() {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -59,7 +75,7 @@ export default function PanelNotifications() {
       setError(null);
     }
     try {
-      const res = await fetch("/api/notifications?limit=8", { cache: "no-store" });
+      const res = await fetch("/api/notifications?limit=all", { cache: "no-store" });
       if (!res.ok) throw new Error("No se pudieron obtener las notificaciones");
       const data = await res.json().catch(() => ({}));
       const list: NotificationItem[] = Array.isArray(data.notifications) ? data.notifications : [];
@@ -145,17 +161,24 @@ export default function PanelNotifications() {
 
       {error && <p className="mt-4 text-sm text-rose-300">{error}</p>}
 
-      <div className="mt-5 max-h-80 overflow-y-auto pr-2">
+      <div className="mt-5 overflow-y-auto pr-2" style={{ maxHeight: PANEL_SCROLL_HEIGHT }}>
         <div className="divide-y divide-slate-800">
           {notifications.length ? (
             notifications.map((entry) => (
               <div key={entry.id} className="flex flex-col gap-2 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <p className="text-sm text-slate-100">{entry.message}</p>
-                  <p className="text-[11px] text-slate-500">{formatRelativeTime(entry.createdAt)}</p>
+                  <p className="text-[11px] text-slate-500">
+                    {formatRelativeTime(entry.createdAt)} · {formatAbsoluteDate(entry.createdAt)}
+                  </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
                   {entry.itemId && <span className="font-mono tracking-wide">{entry.itemId}</span>}
+                  {entry.orderNumber && (
+                    <span className="rounded-full border border-emerald-500/40 px-2 py-0.5 text-emerald-200">
+                      Pedido: {entry.orderNumber}
+                    </span>
+                  )}
                   {entry.status && (
                     <span className={`rounded-full border px-2 py-0.5 ${statusBadgeClass(entry.status)}`}>
                       {entry.status}
@@ -176,7 +199,9 @@ export default function PanelNotifications() {
             <div>
               <p className="text-[10px] uppercase tracking-[0.4em] text-amber-400">Mercado Libre</p>
               <p className="text-sm text-slate-100">{toast.message}</p>
-              <p className="mt-1 text-[11px] text-slate-500">{formatRelativeTime(toast.createdAt)}</p>
+              <p className="mt-1 text-[11px] text-slate-500">
+                {formatRelativeTime(toast.createdAt)} · {formatAbsoluteDate(toast.createdAt)}
+              </p>
             </div>
             <button
               type="button"
