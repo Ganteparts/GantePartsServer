@@ -100,7 +100,7 @@ const MAX_PHOTOS = MAX_ITEM_PHOTOS;
 const MAX_PHOTO_DIMENSION = 1280; // ancho/alto maximo al comprimir
 const PHOTO_QUALITY = 0.8; // calidad JPEG al recomprimir
 const drawingColors = ["#f87171", "#facc15", "#4ade80", "#38bdf8", "#f472b6", "#ffffff"];
-const SHOW_INVENTORY_NOTIFICATIONS_PANEL = false;
+const SHOW_INVENTORY_NOTIFICATIONS_PANEL = true;
 const SHOW_SELECTION_CARD = false;
 const THUMBNAILS_ENABLED = true;
 const THUMBNAIL_PREFETCH_LIMIT = 60; // evita descargas masivas
@@ -422,6 +422,8 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const modalPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const headerUploadFormRef = useRef<HTMLFormElement | null>(null);
+  const headerUploadInputRef = useRef<HTMLInputElement | null>(null);
   const editorCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const photoEditorBaseRef = useRef<string | null>(null);
   const [photoFiles, setPhotoFiles] = useState<File[]>([]);
@@ -1050,6 +1052,23 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
       setPhotoEditorSaving(false);
     }
   }, [photoEditor]);
+
+  const triggerHeaderUpload = useCallback(() => {
+    if (!canImportInventory) {
+      setUploadMessage("Tu rol no puede importar archivos");
+      return;
+    }
+    headerUploadInputRef.current?.click();
+  }, [canImportInventory]);
+
+  const handleHeaderUploadChange = useCallback(() => {
+    if (!headerUploadFormRef.current) return;
+    if (typeof headerUploadFormRef.current.requestSubmit === "function") {
+      headerUploadFormRef.current.requestSubmit();
+    } else {
+      headerUploadFormRef.current.submit();
+    }
+  }, []);
 
   const openPhotoModal = useCallback(
     async (item: Item) => {
@@ -2182,6 +2201,24 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                 >
                   Volver al menú
                 </Link>
+                {!isManualOnly && (
+                  <Link
+                    href="/inventory/manual"
+                    className="rounded-md border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-center text-sm font-semibold text-amber-200 hover:bg-amber-500/20"
+                  >
+                    Abrir captura manual
+                  </Link>
+                )}
+                {!isManualOnly && (
+                  <button
+                    type="button"
+                    onClick={triggerHeaderUpload}
+                    disabled={uploading || !canImportInventory}
+                    className="rounded-md border border-slate-700 px-3 py-2 text-center text-sm text-slate-200 hover:border-amber-400 disabled:opacity-60"
+                  >
+                    {uploading ? "Importando..." : "Importar Excel"}
+                  </button>
+                )}
                 <a
                   href="/api/auth/signout"
                   className="rounded-md border border-slate-700 px-3 py-2 text-center text-sm text-slate-200 hover:border-amber-400"
@@ -2190,60 +2227,20 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                 </a>
               </div>
             </div>
+            {!isManualOnly && (
+              <form ref={headerUploadFormRef} className="hidden" onSubmit={onUpload}>
+                <input
+                  ref={headerUploadInputRef}
+                  type="file"
+                  name="file"
+                  accept=".xlsx,.xls,.csv"
+                  onChange={handleHeaderUploadChange}
+                />
+              </form>
+            )}
             <p className="mt-3 text-sm text-slate-300">Carga manual o importa Excel. Encabezados aceptados: SKU/CODIGO, DESCRIPCION o DESCRIPCION ML o DESCRIPCION LOCAL, PRECIO, INVENTARIO/STOCK/CANTIDAD, CODIGO DE MERCADO LIBRE, CODIGO UNIVERSAL, ESTATUS (active/paused/inactive), ESTATUS INTERNO, ORIGEN, MARCA, COCHE, AÑO DESDE, AÑO HASTA, UBICACION, FACEBOOK, PIEZA.</p>
           </header>
-  {showNotificationsPanel && (
-  <section className="bg-slate-900/70 border border-slate-700 rounded-2xl p-4 shadow space-y-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Notificaciones Mercado Libre</h2>
-              <p className="text-xs text-slate-400">Sincronizamos cada 20 segundos o cuando hagas clic en actualizar.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => fetchNotifications({ silent: false })}
-                disabled={notificationsLoading}
-                className="rounded-md border border-slate-600 px-3 py-2 text-sm text-slate-100 hover:border-amber-400 disabled:opacity-60"
-              >
-                {notificationsLoading ? "Actualizando..." : "Actualizar"}
-              </button>
-              <button
-                type="button"
-                onClick={() => toggleSection("notifications")}
-                className="rounded-md border border-transparent px-3 py-2 text-xs font-semibold uppercase tracking-wide text-amber-300 md:hidden"
-              >
-                {sectionVisibility.notifications ? "Ocultar" : "Mostrar"}
-              </button>
-            </div>
-          </div>
-          <div className={isMobile && !sectionVisibility.notifications ? "hidden" : "block"}>
-            {notifications.length ? (
-              <ul className="divide-y divide-slate-700 text-sm text-slate-100">
-                {notifications.slice(0, 6).map((entry) => (
-                  <li key={entry.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <p className="text-sm">{entry.message}</p>
-                      <p className="text-[11px] text-slate-500">{formatRelativeTime(entry.createdAt)}</p>
-                    </div>
-                    <div className="flex flex-col items-start gap-1 text-[11px] text-slate-400 sm:items-end">
-                      {entry.itemId && <span className="font-mono tracking-wide">{entry.itemId}</span>}
-                      {entry.status && (
-                        <span className={`rounded-full border px-2 py-0.5 ${getStatusBadgeClass(entry.status)}`}>
-                          {entry.status}
-                        </span>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-slate-400">Sin eventos recientes.</p>
-            )}
-          </div>
-        </section>
-        )}
-
+        {isManualOnly && (
         <section className="bg-slate-800/80 border border-slate-700 rounded-2xl p-4 shadow space-y-4">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-1">
@@ -2541,80 +2538,62 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
             )}
           </div>
         </section>
+        )}
 
   {!isManualOnly && (
   <>
-  <section className="bg-slate-800/80 border border-slate-700 rounded-2xl p-4 shadow space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold">Importar Excel</h2>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={downloadTemplate}
-                disabled={downloading}
-                className="rounded-md border border-slate-600 px-3 py-2 text-sm text-slate-100 hover:border-amber-400 disabled:opacity-60"
-              >
-                {downloading ? "Descargando..." : "Descargar plantilla"}
-              </button>
-              {canImportInventory && (
-                <button
-                  type="button"
-                  onClick={() => toggleSection("import")}
-                  className="rounded-md border border-transparent px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-amber-300 md:hidden"
-                >
-                  {sectionVisibility.import ? "Ocultar" : "Mostrar"}
-                </button>
-              )}
-            </div>
-          </div>
-          <div className={isMobile && canImportInventory && !sectionVisibility.import ? "hidden" : "space-y-3"}>
-            {canImportInventory ? (
-              <>
-                <form className="flex flex-col gap-3 sm:flex-row" onSubmit={onUpload}>
-                  <input
-                    type="file"
-                    name="file"
-                    accept=".xlsx,.xls,.csv"
-                    className="text-sm text-slate-200"
-                  />
-                  <div className="flex gap-3">
-                    <button
-                      type="submit"
-                      disabled={uploading}
-                      className="rounded-md bg-primary px-4 py-2 font-semibold text-white hover:bg-teal-700 disabled:opacity-60"
-                    >
-                      {uploading ? "Importando..." : "Importar"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={downloadTemplate}
-                      disabled={downloading}
-                      className="rounded-md border border-slate-600 px-4 py-2 text-sm text-slate-100 hover:border-amber-400 disabled:opacity-60 sm:hidden"
-                    >
-                      {downloading ? "Descargando..." : "Descargar plantilla"}
-                    </button>
-                  </div>
-                </form>
-                {uploadMessage && <p className="text-sm text-amber-300">{uploadMessage}</p>}
-                {uploadErrors.length > 0 && (
-                  <div className="space-y-1 text-xs text-slate-200">
-                    {uploadErrors.slice(0, 5).map((err, i) => (
-                      <div key={i}>• {err}</div>
-                    ))}
-                    {uploadErrors.length > 5 && <div>... y mas ({uploadErrors.length - 5})</div>}
-                  </div>
-                )}
-                <p className="text-xs text-slate-400">Encabezados soportados: ESTATUS, DESCRIPCION, DESCRIPCION ML, DESCRIPCION LOCAL, PRECIO, CODIGO, STOCK, CODIGO UNIVERSAL, CODIGO DE MERCADO LIBRE, ESTATUS INTERNO, ORIGEN, MARCA, COCHE, AÑO DESDE, AÑO HASTA, UBICACION, FACEBOOK, PIEZA.</p>
-              </>
-            ) : (
-              <p className="text-sm text-slate-400">
-                Solo administradores pueden importar archivos. Utiliza la captura manual para dar de alta productos.
-              </p>
-            )}
-          </div>
-        </section>
-
         <section className="bg-slate-800/80 border border-slate-700 rounded-2xl p-4 shadow space-y-3">
+          {showNotificationsPanel && (
+            <section className="bg-slate-900/70 border border-slate-700 rounded-2xl p-4 shadow space-y-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold">Notificaciones Mercado Libre</h2>
+                  <p className="text-xs text-slate-400">Sincronizamos cada 20 segundos o cuando hagas clic en actualizar.</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => fetchNotifications({ silent: false })}
+                    disabled={notificationsLoading}
+                    className="rounded-md border border-slate-600 px-3 py-2 text-sm text-slate-100 hover:border-amber-400 disabled:opacity-60"
+                  >
+                    {notificationsLoading ? "Actualizando..." : "Actualizar"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleSection("notifications")}
+                    className="rounded-md border border-transparent px-3 py-2 text-xs font-semibold uppercase tracking-wide text-amber-300 md:hidden"
+                  >
+                    {sectionVisibility.notifications ? "Ocultar" : "Mostrar"}
+                  </button>
+                </div>
+              </div>
+              <div className={isMobile && !sectionVisibility.notifications ? "hidden" : "block"}>
+                {notifications.length ? (
+                  <ul className="divide-y divide-slate-700 text-sm text-slate-100">
+                    {notifications.slice(0, 6).map((entry) => (
+                      <li key={entry.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <p className="text-sm">{entry.message}</p>
+                          <p className="text-[11px] text-slate-500">{formatRelativeTime(entry.createdAt)}</p>
+                        </div>
+                        <div className="flex flex-col items-start gap-1 text-[11px] text-slate-400 sm:items-end">
+                          {entry.itemId && <span className="font-mono tracking-wide">{entry.itemId}</span>}
+                          {entry.status && (
+                            <span className={`rounded-full border px-2 py-0.5 ${getStatusBadgeClass(entry.status)}`}>
+                              {entry.status}
+                            </span>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-slate-400">Sin eventos recientes.</p>
+                )}
+              </div>
+            </section>
+          )}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-1">
               <h2 className="text-lg font-semibold">Inventario cargado</h2>
