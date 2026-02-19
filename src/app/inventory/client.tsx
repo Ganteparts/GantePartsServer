@@ -102,7 +102,7 @@ const PHOTO_QUALITY = 0.8; // calidad JPEG al recomprimir
 const drawingColors = ["#f87171", "#facc15", "#4ade80", "#38bdf8", "#f472b6", "#ffffff"];
 const SHOW_INVENTORY_NOTIFICATIONS_PANEL = false;
 const SHOW_SELECTION_CARD = false;
-const THUMBNAILS_ENABLED = false;
+const THUMBNAILS_ENABLED = true;
 const THUMBNAIL_PREFETCH_LIMIT = 60; // evita descargas masivas
 const THUMBNAIL_FETCH_GAP_MS = 120;
 
@@ -447,7 +447,6 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
   const [photoModalError, setPhotoModalError] = useState<string | null>(null);
   const [photoModalLoading, setPhotoModalLoading] = useState(false);
   const [modalActiveIndex, setModalActiveIndex] = useState(0);
-  const [showThumbnails, setShowThumbnails] = useState(false);
   const [thumbnailCache, setThumbnailCache] = useState<Record<string, string | null>>({});
   const [thumbnailLoadingIds, setThumbnailLoadingIds] = useState<Record<string, boolean>>({});
   const [thumbnailErrors, setThumbnailErrors] = useState<Record<string, string | null>>({});
@@ -475,7 +474,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
   const canCreateManual = canEditInventory || normalizedRole === "operator" || normalizedRole === "uploader";
   const canImportInventory = canEditInventory;
   const canManageMercadoLibre = canEditInventory;
-  const thumbnailsActive = showThumbnails && THUMBNAILS_ENABLED;
+  const thumbnailsActive = THUMBNAILS_ENABLED;
 
   useEffect(() => {
     const handleResize = () => {
@@ -498,12 +497,6 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
       setSectionVisibility({ notifications: SHOW_INVENTORY_NOTIFICATIONS_PANEL, manual: true, import: true });
     }
   }, [isManualOnly, isMobile]);
-
-  useEffect(() => {
-    if (!THUMBNAILS_ENABLED && showThumbnails) {
-      setShowThumbnails(false);
-    }
-  }, [showThumbnails]);
 
   const toggleSection = useCallback((section: SectionKey) => {
     if (!isMobile || isManualOnly) return;
@@ -2640,29 +2633,6 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                   placeholder="Ej. faro, versa, 12345"
                   className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-white outline-none transition focus:border-amber-400"
                 />
-                <div className="mt-3 flex flex-col gap-2 rounded-2xl border border-slate-800/80 bg-slate-950/40 p-3 text-sm text-slate-300 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="space-y-1">
-                    <p className="font-semibold text-slate-100">Ver miniaturas</p>
-                    <p className="text-[11px] text-slate-500">
-                      {THUMBNAILS_ENABLED
-                        ? "Carga diferida de la primera foto para cada pieza. Solo se descargan cuando esta opcion esta activa."
-                        : "Miniaturas desactivadas temporalmente para acelerar la carga."}
-                    </p>
-                  </div>
-                  {THUMBNAILS_ENABLED && (
-                    <label className="inline-flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 rounded border-slate-600 bg-slate-950 text-amber-400 focus:ring-amber-400"
-                        checked={showThumbnails}
-                        onChange={(event) => setShowThumbnails(event.target.checked)}
-                      />
-                      <span className="text-xs text-slate-200">
-                        {showThumbnails ? "Miniaturas activas" : "Activar miniaturas"}
-                      </span>
-                    </label>
-                  )}
-                </div>
                 <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
                   <div>
                     <label className="text-sm text-slate-400" htmlFor="inventory-piece-filter">
@@ -3012,15 +2982,22 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                     const extra = item.extraData ?? {};
                     const internalStatusRaw = (extra.estatus_interno ?? "").toString().trim();
                     const internalStatus = internalStatusRaw.length ? internalStatusRaw.toUpperCase() : "SIN ESTATUS";
+                    const shouldShowLoanTooltip = internalStatus === "PRESTADO" || internalStatus === "VENDIDO";
+                    const prestadoVendidoAValue = ((extra.prestado_vendido_a ?? "-").toString().trim() || "-").toUpperCase();
+                    const fechaPrestamoValue = extra.fecha_prestamo_pago ? formatDate(extra.fecha_prestamo_pago) : "-";
+                    const pieceTooltip = shouldShowLoanTooltip
+                      ? `PRESTADO/VENDIDO A: ${prestadoVendidoAValue}\nFECHA PRESTAMO: ${fechaPrestamoValue}`
+                      : undefined;
                     const yearLabel = getItemYearLabel(item);
                     const pieceName = getItemPieceName(item);
                     const isSelected = selectedIds.includes(item.id);
                     const isEditing = editingRowId === item.id;
                     const rowStatusClass = internalStatus === "VENDIDO"
-                      ? "bg-rose-950/40"
+                      ? "bg-red-950/40"
                       : internalStatus === "PRESTADO"
-                      ? "bg-sky-950/40"
+                      ? "bg-yellow-900/40"
                       : "";
+                    const rowSelectionClass = isSelected ? "bg-blue-900/45" : "";
                     const photosCount = typeof item.photoCount === "number" ? item.photoCount : 0;
                     const mlUrl = item.mlItemId ? `https://articulo.mercadolibre.com.mx/${item.mlItemId}` : null;
                     const previewEnabled = thumbnailsActive && photosCount > 0;
@@ -3030,7 +3007,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                     return (
                       <tr
                         key={item.id}
-                        className={`h-14 border-t border-slate-900/80 bg-slate-900/30 transition hover:bg-slate-900/70 ${rowStatusClass}`}
+                        className={`h-14 border-t border-slate-900/80 transition ${!isSelected && !rowStatusClass ? "bg-slate-900/30 hover:bg-slate-900/70" : ""} ${isSelected ? rowSelectionClass : rowStatusClass}`}
                         onClick={() => setFocusedRowInfo(toFocusedInfo(item))}
                       >
                         <td className="whitespace-nowrap px-4 py-3 align-middle">
@@ -3085,7 +3062,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                           )}
                         </td>
                         <td className="min-w-[220px] px-4 py-3 align-top">
-                          <div className="font-semibold text-white">{pieceName}</div>
+                          <div className="font-semibold text-white" title={pieceTooltip}>{pieceName}</div>
                           {extra.ubicacion && (
                             <div className="text-xs text-slate-500">Ubicacion: {extra.ubicacion}</div>
                           )}
@@ -3138,7 +3115,7 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                           <div className="flex items-center gap-3">
                             <button
                               type="button"
-                              className={`relative flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 transition ${
+                              className={`relative flex h-16 w-16 items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-slate-950/60 text-[10px] text-slate-500 transition ${
                                 canEditInventory ? "hover:border-amber-300" : "opacity-60"
                               }`}
                               onClick={(event) => {
@@ -3178,27 +3155,12 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                             </button>
                             <div className="text-xs text-slate-400">
                               {photosCount ? `${photosCount} fotos` : "Sin fotos"}
-                              {photosCount ? (
-                                showThumbnails ? (
-                                  previewSrc ? (
-                                    <p className="text-[10px] text-emerald-200">Miniatura lista</p>
-                                  ) : previewLoading ? (
-                                    <p className="text-[10px] text-amber-200">Cargando miniatura...</p>
-                                  ) : previewError ? (
-                                    <p className="text-[10px] text-rose-300">{previewError}</p>
-                                  ) : (
-                                    <p className="text-[10px] text-slate-500">Miniatura pendiente</p>
-                                  )
-                                ) : (
-                                  <p className="text-[10px] text-slate-500">Activa la opción de miniaturas para previsualizar.</p>
-                                )
-                              ) : null}
                             </div>
                           </div>
                         </td>
                         <td className="px-4 py-3 align-middle text-slate-100">{item.status || "-"}</td>
                         <td className="min-w-[240px] px-4 py-3 align-top text-slate-100">
-                          <div className="max-w-[320px] truncate">{pieceName}</div>
+                          <div className="max-w-[320px] truncate" title={pieceTooltip}>{pieceName}</div>
                         </td>
                         <td className="min-w-[220px] px-4 py-3 align-top text-slate-100">
                           <div className="max-w-[320px] truncate">{extra.descripcion_ml ?? "-"}</div>
