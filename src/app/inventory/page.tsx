@@ -20,7 +20,15 @@ export default async function InventoryPage() {
 
   const role = (session.user.role ?? "").toLowerCase();
   const ownerId = role === "viewer" ? session.user.id : null;
-  const { items, total } = await getInventorySnapshot(ownerId, INVENTORY_FULL_PAGE_SIZE);
+  let items: unknown[] = [];
+  let total = 0;
+  try {
+    const snapshot = await getInventorySnapshot(ownerId, INVENTORY_FULL_PAGE_SIZE);
+    items = snapshot.items as unknown[];
+    total = snapshot.total;
+  } catch (err) {
+    console.error("[inventory] snapshot failed", err);
+  }
   const plainItems = items as InventoryClientItem[];
   const initialPageSize = plainItems.length;
 

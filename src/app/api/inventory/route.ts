@@ -227,15 +227,62 @@ export async function GET(req: Request) {
   };
   const where = buildFiltersWhere(filters, baseWhere);
 
-  const [items, total] = await Promise.all([
+  type InventoryListRow = {
+    id: string;
+    skuInternal: string;
+    sellerCustomField: string | null;
+    title: string | null;
+    price: unknown;
+    stock: number;
+    status: string;
+    mlItemId: string | null;
+    extraData: unknown;
+    photoCount: number;
+    createdAt: Date;
+    updatedAt: Date;
+  };
+
+  const [idRows, total] = await Promise.all([
     prisma.inventoryItem.findMany({
       where,
       orderBy: { updatedAt: "desc" },
       skip,
-      take: pageSize
+      take: pageSize,
+      select: { id: true }
     }),
     prisma.inventoryItem.count({ where })
   ]);
+
+  const ids = idRows.map((row) => row.id);
+  let items: InventoryListRow[] = [];
+  if (ids.length) {
+    const rawItems = await prisma.$queryRaw<InventoryListRow[]>(Prisma.sql`
+      SELECT
+        "id",
+        "skuInternal",
+        "sellerCustomField",
+        "title",
+        "price",
+        "stock",
+        "status",
+        "mlItemId",
+        ("extraData" - 'photos') AS "extraData",
+        COALESCE(
+          CASE
+            WHEN jsonb_typeof("extraData"->'photos') = 'array' THEN jsonb_array_length("extraData"->'photos')
+            ELSE 0
+          END,
+          0
+        )::int AS "photoCount",
+        "createdAt",
+        "updatedAt"
+      FROM "InventoryItem"
+      WHERE "id" IN (${Prisma.join(ids)})
+    `);
+
+    const byId = new Map(rawItems.map((row) => [row.id, row] as const));
+    items = ids.map((id) => byId.get(id)).filter((row): row is InventoryListRow => Boolean(row));
+  }
 
   const serialized = items.map((item) => serializeInventoryItem(item));
   const totalPages = Math.max(1, Math.ceil(total / pageSize));

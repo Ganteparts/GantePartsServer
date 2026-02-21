@@ -105,6 +105,9 @@ const SHOW_SELECTION_CARD = false;
 const THUMBNAILS_ENABLED = true;
 const THUMBNAIL_PREFETCH_LIMIT = 60; // evita descargas masivas
 const THUMBNAIL_FETCH_GAP_MS = 120;
+const NOTIFICATIONS_VISIBLE_COUNT = 10;
+const NOTIFICATIONS_ROW_HEIGHT = 56;
+const NOTIFICATIONS_PANEL_HEIGHT = NOTIFICATIONS_VISIBLE_COUNT * NOTIFICATIONS_ROW_HEIGHT;
 
 const makePhotoKey = (file: File) => `${file.name}-${file.size}-${file.lastModified}`;
 
@@ -2570,8 +2573,9 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
               </div>
               <div className={isMobile && !sectionVisibility.notifications ? "hidden" : "block"}>
                 {notifications.length ? (
-                  <ul className="divide-y divide-slate-700 text-sm text-slate-100">
-                    {notifications.slice(0, 6).map((entry) => (
+                  <div className="overflow-y-auto pr-2" style={{ maxHeight: NOTIFICATIONS_PANEL_HEIGHT }}>
+                    <ul className="divide-y divide-slate-700 text-sm text-slate-100">
+                      {notifications.map((entry) => (
                       <li key={entry.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
                         <div>
                           <p className="text-sm">{entry.message}</p>
@@ -2586,8 +2590,9 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                           )}
                         </div>
                       </li>
-                    ))}
-                  </ul>
+                      ))}
+                    </ul>
+                  </div>
                 ) : (
                   <p className="text-sm text-slate-400">Sin eventos recientes.</p>
                 )}
@@ -2762,41 +2767,6 @@ export function InventoryClient({ initialPage, userRole, mode = "full" }: Invent
                   Selecciona una celda o marca un registro para ver el SKU, el coche, el rango de años y la descripción.
                 </p>
               )}
-            </div>
-          )}
-          {canManageMercadoLibre ? (
-            <div className="flex flex-col gap-3 rounded-2xl border border-slate-700 bg-slate-900/60 p-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="space-y-1">
-                <p className="text-xs text-slate-400">Acciones Mercado Libre</p>
-                <p className="text-[11px] text-slate-500">
-                  {selectedWithMlCount
-                    ? `${selectedWithMlCount} ${selectedWithMlCount === 1 ? "seleccionado" : "seleccionados"} con codigo`
-                    : "Selecciona registros con codigo de Mercado Libre"}
-                  {hasSelectedWithoutMl ? " · Algunos seleccionados no tienen codigo" : ""}
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => performMlAction("pause")}
-                  disabled={mlActionDisabled}
-                  className="rounded-md border border-amber-400 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-amber-200 hover:bg-amber-400/10 disabled:opacity-60"
-                >
-                  {mlAction === "pause" ? "Pausando..." : "Pausar en ML"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => performMlAction("activate")}
-                  disabled={mlActionDisabled}
-                  className="rounded-md border border-teal-400 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-teal-200 hover:bg-teal-400/10 disabled:opacity-60"
-                >
-                  {mlAction === "activate" ? "Activando..." : "Activar en ML"}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-slate-700 bg-slate-900/60 p-3 text-xs text-slate-400">
-              Tu rol no puede pausar o activar publicaciones en Mercado Libre.
             </div>
           )}
           {statusCounters.length > 0 && (

@@ -76,6 +76,14 @@ export const serializeInventoryItem = <T extends { price: any; extraData?: any }
   const { extraData, photoCount, photos } = sanitizeInventoryExtraData(item.extraData ?? null, {
     includePhotos: options?.includePhotos
   });
+
+  const providedPhotoCount = (item as any)?.photoCount;
+  const resolvedPhotoCount =
+    typeof providedPhotoCount === "number" && Number.isFinite(providedPhotoCount) && providedPhotoCount >= 0
+      ? providedPhotoCount
+      : photoCount;
+
+  const providedPhotoPreview = (item as any)?.photoPreview;
   const priceValue =
     item.price !== null && item.price !== undefined ? Number(item.price as number) : null;
 
@@ -83,11 +91,13 @@ export const serializeInventoryItem = <T extends { price: any; extraData?: any }
     ...(item as any),
     price: priceValue,
     extraData,
-    photoCount
+    photoCount: resolvedPhotoCount
   };
 
   if (options?.includePhotoPreview) {
-    payload.photoPreview = photos[0] ?? null;
+    payload.photoPreview = typeof providedPhotoPreview === "string" || providedPhotoPreview === null
+      ? providedPhotoPreview
+      : (photos[0] ?? null);
   }
 
   return payload;

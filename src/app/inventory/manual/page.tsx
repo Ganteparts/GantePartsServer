@@ -17,7 +17,13 @@ export default async function ManualInventoryPage() {
 
   const role = (session.user.role ?? "operator").toLowerCase();
   const ownerId = role === "viewer" ? session.user.id : null;
-  const { items } = await getInventorySnapshot(ownerId, MANUAL_SUGGESTION_LIMIT);
+  let items: unknown[] = [];
+  try {
+    const snapshot = await getInventorySnapshot(ownerId, MANUAL_SUGGESTION_LIMIT);
+    items = snapshot.items as unknown[];
+  } catch (err) {
+    console.error("[inventory] manual snapshot failed", err);
+  }
   const serialized = items as InventoryClientItem[];
 
   const initialPage: InventoryInitialPage = {
